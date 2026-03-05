@@ -1,0 +1,11 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Generated output files
+rotate.csv
+rotated.molden
+rotated.h5
+ALTER.txt
