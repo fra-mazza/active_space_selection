@@ -23,7 +23,8 @@ The workflow implemented by this tool is:
 | File | Contents |
 |---|---|
 | `rotate.csv` | 3×3 rotation matrix (CSV) used to align the reference onto the target |
-| `rotated.molden` | Molden file of the reference with rotated MO coefficients and target coordinates |
+| `rotated.molden` | *(Molden mode only)* Molden file of the reference with rotated MO coefficients and target coordinates |
+| `rotated.h5` | *(HDF5 mode only)* Copy of the reference HDF5 file with `MO_VECTORS` replaced by the rotated MO coefficients |
 | `ALTER.txt` | OpenMolcas `ALTER` keyword block for reordering the target active space |
 
 ---
@@ -31,10 +32,11 @@ The workflow implemented by this tool is:
 ## Requirements
 
 - **Python ≥ 3.8**
-- [NumPy](https://numpy.org/)
-- [SciPy](https://scipy.org/)
-- [sphecerix](https://github.com/ifilot/sphecerix) – Wigner D-matrix library for real (tesseral) spherical harmonics
-- **orbkit** (modified) – included in this repository as a Git submodule; the upstream version has been patched to correctly parse Molden files produced by **OpenMolcas**
+- [NumPy](https://numpy.org/) ≥ 1.20
+- [SciPy](https://scipy.org/) ≥ 1.7, < 1.15 (SciPy ≥ 1.15 requires a patch to the `sph_harm_y` function inside **sphecerix**)
+- [sphecerix](https://github.com/ifilot/sphecerix) == 0.5.0 – Wigner D-matrix library for real (tesseral) spherical harmonics
+- **orbkit** (modified) – included in this repository as a Git submodule; the upstream version has been patched to correctly parse Molden files produced by **OpenMolcas**. Only required when using Molden input files.
+- [h5py](https://www.h5py.org/) ≥ 3.0 – required only when using OpenMolcas HDF5 (`.h5`) input files
 
 ---
 
@@ -64,7 +66,7 @@ pip install -e orbkit/
 ### 3. Install the remaining Python dependencies
 
 ```bash
-pip install numpy scipy sphecerix
+pip install "numpy>=1.20" "scipy>=1.7,<1.15" "sphecerix==0.5.0" h5py
 ```
 
 ---
@@ -73,8 +75,8 @@ pip install numpy scipy sphecerix
 
 ```
 python active_space_selection.py \
-    --ref   <ref1.molden> [<ref2.molden> ...] \
-    --target <target.molden> \
+    --ref   <ref1.molden|ref1.h5> [<ref2.molden|ref2.h5> ...] \
+    --target <target.molden|target.h5> \
     --ref_orbitals <orb_list_1> [<orb_list_2> ...] \
     --active_space <active_orb_list> \
     [--atoms <atom_list>]
@@ -84,13 +86,13 @@ python active_space_selection.py \
 
 | Argument | Required | Description |
 |---|---|---|
-| `--ref` | yes | One or more reference Molden files (space-separated). |
-| `--target` | yes | Single target Molden file. Output files are written to the same directory. |
+| `--ref` | yes | One or more reference Molden or HDF5 files (space-separated). All files must be of the same type. |
+| `--target` | yes | Single target Molden or HDF5 file. Output files are written to the same directory. |
 | `--ref_orbitals` | yes | Active-space orbital indices (1-based) for each reference file. Use commas for individual orbitals, hyphens for ranges, and colons to separate lists for different reference files. Example: `1-5,7:2-6,9` supplies `[1,2,3,4,5,7]` for the first reference and `[2,3,4,5,6,9]` for the second. |
 | `--active_space` | yes | Active-space orbital indices (1-based) of the target system. Example: `4,6-9` → `[4,6,7,8,9]`. |
 | `--atoms` | no | Subset of atom indices (1-based) to use for the Kabsch alignment. Useful when only part of the molecule is rigid (e.g., exclude a flexible substituent). If omitted, all atoms are used. Example: `1,3-5,8`. |
 
-### Example – phenol test case
+### Example – phenol test case (Molden)
 
 The `test/phenol_scf/` directory contains a ready-to-use example with reference and target Molden files for phenol. The active-space orbitals are listed in `test/active_orbitals.txt` and the reference orbitals in `test/ref_orbitals.txt`.
 
@@ -108,6 +110,23 @@ python active_space_selection.py \
 
 After the run, the files `rotate.csv`, `rotated.molden`, and `ALTER.txt` will appear inside `test/phenol_scf/`.
 
+### Example – HDF5 input
+
+When OpenMolcas HDF5 files are used, the AO overlap matrix is read directly from the file, **skipping the expensive analytical-integral step** performed by orbkit in the Molden workflow.
+
+```bash
+REF_ORBS=$(cat test/ref_orbitals.txt)
+ACTIVE=$(cat test/active_orbitals.txt)
+
+python active_space_selection.py \
+    --ref    test/phenol_scf/ref.h5 \
+    --target test/phenol_scf/target.h5 \
+    --ref_orbitals "$REF_ORBS" \
+    --active_space "$ACTIVE"
+```
+
+After the run, the files `rotate.csv`, `rotated.h5`, and `ALTER.txt` will appear inside `test/phenol_scf/`.
+
 ---
 
 ## Notes
@@ -116,3 +135,5 @@ After the run, the files `rotate.csv`, `rotated.molden`, and `ALTER.txt` will ap
 - The orbital indices supplied to `--ref_orbitals` and `--active_space` are **1-based** (as printed by OpenMolcas and as shown in standard MO visualisation tools).
 - When multiple reference files are supplied, the tool picks the one with the **lowest RMSD** to the target and prints the RMSD values for all references to standard output, allowing you to verify the quality of the alignment.
 - Overlaps with `|S| < 0.8` or `|S| > 1.2` are flagged as warnings in `ALTER.txt` and on standard output; always inspect these manually before submitting the next calculation.
+- All `--ref` and `--target` files must be of the same type (all Molden **or** all HDF5); mixing the two formats is not supported.
+- In HDF5 mode the `rotated.h5` output file is a copy of the best reference HDF5 file with its `MO_VECTORS` dataset replaced by the rotated MO coefficients; all other datasets (including geometry and basis information) are preserved unchanged.

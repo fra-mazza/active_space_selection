@@ -4,15 +4,26 @@ Merged script for molecular orbital alignment workflow:
 1. Compute optimal rotation between geometries (Kabsch algorithm)
 2. Rotate reference MO coefficients
 3. Calculate orbital overlaps with target
+
+Supports both Molden files and OpenMolcas HDF5 (.h5) files as input.
+When HDF5 files are used the pre-computed AO overlap matrix stored in the
+file is reused directly, avoiding the heavy analytical-integral step.
 """
 
 import os
+import shutil
 import numpy as np
 import argparse
 import re
 from scipy.spatial.transform import Rotation as R
 from sphecerix import tesseral_wigner_D
-from orbkit import read, analytical_integrals
+
+# orbkit is only needed for Molden files; imported lazily inside compute_orbital_overlaps()
+try:
+    import h5py
+    _H5PY_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _H5PY_AVAILABLE = False
 
 # ========================== Kabsch Algorithm Functions ========================
 
@@ -466,8 +477,8 @@ def create_rotated_molden(input_molden, output_molden, R_mat, tar_coords):
     write_new_molden_file(input_molden, output_molden, new_mo_coeff_blocks, tar_coords)
     print(f"Rotated Molden file written to {output_molden}")
 
-def extract_atom_coords(filename):
-    """Extract atomic coordinates from [Atoms] section"""
+def extract_atom_coords_molden(filename):
+    """Extract atomic coordinates from the [Atoms] section of a Molden file."""
     sections = parse_molden_sections(filename)
     for header, content in sections:
         if header.upper().startswith("[ATOMS]"):
@@ -481,10 +492,18 @@ def extract_atom_coords(filename):
     raise ValueError(f"No [Atoms] section found in {filename}")
 
 
+def extract_atom_coords(filename):
+    """Extract atomic coordinates from a Molden or OpenMolcas HDF5 file."""
+    if is_h5_file(filename):
+        return extract_atom_coords_h5(filename)
+    return extract_atom_coords_molden(filename)
+
+
 # ======================== Overlap Calculation =================================
 
 def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orbitals):
-    """Calculate and print orbital overlaps"""
+    """Calculate and print orbital overlaps (Molden workflow, uses orbkit)."""
+    from orbkit import read, analytical_integrals  # lazy import: only needed for Molden files
     qc_rot = read.main_read(rotated_file, itype='molden', all_mo=True)
     qc_tar = read.main_read(target_file, itype='molden', all_mo=True)
     
@@ -554,6 +573,216 @@ def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orb
             print(line)
        alterfile.write(line)
      
+# ======================== HDF5 File Processing ================================
+
+def is_h5_file(filepath):
+    """Return True if *filepath* looks like an HDF5 file (by extension)."""
+    return filepath.lower().endswith('.h5') or filepath.lower().endswith('.hdf5')
+
+
+def extract_atom_coords_h5(filename):
+    """Extract atomic coordinates (in Bohr) from an OpenMolcas HDF5 file."""
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to read HDF5 files: pip install h5py")
+    with h5py.File(filename, 'r') as f:
+        return np.array(f['CENTER_COORDINATES'])
+
+
+def get_rotation_blocks_from_h5(filename):
+    """
+    Parse ``BASIS_FUNCTION_IDS`` from an OpenMolcas HDF5 file and build the
+    list of rotation blocks needed to apply Wigner D-matrices to MO coefficients.
+
+    Each rotation block corresponds to one (center, angular-momentum *l*, radial
+    shell) group.  For *s* shells the block has length 1, for *p* length 3, etc.
+    Within a block the m-components may be stored non-contiguously in the HDF5
+    AO ordering (e.g., for *p* the two radial shells interleave: px1, px2, py1,
+    py2, pz1, pz2).  This function collects the correct AO indices and the
+    corresponding m values for each block.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the OpenMolcas HDF5 file.
+
+    Returns
+    -------
+    list of (ao_indices, m_values, l)
+        ``ao_indices`` : list of int  – indices of these AOs in the h5 ordering
+        ``m_values``   : list of int  – magnetic quantum numbers in the h5 order
+        ``l``          : int          – angular momentum of the shell
+    """
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to read HDF5 files: pip install h5py")
+    with h5py.File(filename, 'r') as f:
+        bf_ids = np.array(f['BASIS_FUNCTION_IDS'])  # (n_basis, 4): center, shell, l, m
+
+    # Group AO indices by (center, l, shell_index)
+    groups = {}
+    for ao_idx, row in enumerate(bf_ids):
+        center, shell, l, m = int(row[0]), int(row[1]), int(row[2]), int(row[3])
+        key = (center, l, shell)
+        groups.setdefault(key, []).append((ao_idx, m))
+
+    # Sort blocks by the smallest ao_idx in each group (preserves AO ordering)
+    blocks = []
+    for key in sorted(groups, key=lambda k: groups[k][0][0]):
+        items = sorted(groups[key], key=lambda x: x[0])
+        ao_indices = [x[0] for x in items]
+        m_values = [x[1] for x in items]
+        blocks.append((ao_indices, m_values, int(key[1])))
+
+    return blocks
+
+
+def rotate_mo_coefficients_h5(C_raw, rotation_blocks, rotation_matrix):
+    """
+    Rotate MO coefficients (stored row-major as ``C_raw[mo, ao]``) shell by shell
+    using Wigner D-matrices, following the same logic as
+    :func:`rotate_mo_coefficients_from_molden`.
+
+    Parameters
+    ----------
+    C_raw : ndarray, shape (n_mo, n_basis)
+        MO coefficients as read from ``MO_VECTORS`` after reshaping.
+    rotation_blocks : list of (ao_indices, m_values, l)
+        Output of :func:`get_rotation_blocks_from_h5`.
+    rotation_matrix : ndarray, shape (3, 3)
+        Active rotation matrix (R_ref→target).
+
+    Returns
+    -------
+    ndarray, shape (n_mo, n_basis)
+        Rotated MO coefficients in the same row-major layout.
+    """
+    C_rot = C_raw.copy()
+    Robj = R.from_matrix(rotation_matrix)
+
+    for ao_indices, m_values, l in rotation_blocks:
+        D = tesseral_wigner_D(l, Robj)
+
+        # Build permutation: h5 m-order → sphecerix order (−l … +l)
+        sphecerix_m = list(range(-l, l + 1))
+        perm = [m_values.index(m) for m in sphecerix_m]
+        inv_perm = [0] * len(perm)
+        for i, p in enumerate(perm):
+            inv_perm[p] = i
+
+        # Extract block, shape (n_mo, 2l+1)
+        block = C_raw[:, ao_indices]
+        block_sph = block[:, perm]          # permute to sphecerix m-order
+        rotated_sph = block_sph @ D.T       # apply Wigner D to all MOs at once
+        C_rot[:, ao_indices] = rotated_sph[:, inv_perm]  # restore h5 m-order
+
+    return C_rot
+
+
+def write_rotated_h5(source_h5, output_h5, C_rotated):
+    """
+    Write a new HDF5 file that is a copy of *source_h5* with ``MO_VECTORS``
+    replaced by the rotated MO coefficients.  Analogous to
+    :func:`write_new_molden_file` for the Molden workflow.
+
+    Parameters
+    ----------
+    source_h5 : str
+        Path to the reference OpenMolcas HDF5 file (used as template).
+    output_h5 : str
+        Path where the new HDF5 file will be written.
+    C_rotated : ndarray, shape (n_mo, n_basis)
+        Rotated MO coefficients (row = MO, col = AO).
+    """
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to write HDF5 files: pip install h5py")
+    shutil.copy2(source_h5, output_h5)
+    with h5py.File(output_h5, 'r+') as f:
+        f['MO_VECTORS'][...] = C_rotated.ravel()
+    print(f"Rotated HDF5 file written to {output_h5}")
+
+
+def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbitals,
+                                  target_dir):
+    """
+    Compute MO overlaps using the pre-computed AO overlap matrix stored inside
+    the target HDF5 file, then write ``ALTER.txt``.
+
+    This avoids the heavy analytical AO-overlap calculation performed by orbkit
+    when Molden files are used.
+
+    Parameters
+    ----------
+    C_rot_raw : ndarray, shape (n_mo, n_basis)
+        Rotated reference MO coefficients (row = MO, col = AO).
+    target_h5 : str
+        Path to the target OpenMolcas HDF5 file.
+    ref_orbitals : list of int
+        1-based indices of the reference active-space orbitals.
+    active_orbitals : list of int
+        1-based indices of the target active space.
+    target_dir : str
+        Directory where ``ALTER.txt`` will be written.
+    """
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to read HDF5 files: pip install h5py")
+
+    with h5py.File(target_h5, 'r') as f:
+        # OpenMolcas writes MO_VECTORS as a flat row-major (n_mo × n_basis) array.
+        # For standard CASSCF/RHF output n_mo == n_basis (all MOs are stored).
+        n_basis = int(np.sqrt(len(f['AO_OVERLAP_MATRIX'])))
+        S_AO = np.array(f['AO_OVERLAP_MATRIX']).reshape(n_basis, n_basis)
+        n_mo_x_basis = len(f['MO_VECTORS'])
+        n_mo = n_mo_x_basis // n_basis
+        C_tar_raw = np.array(f['MO_VECTORS']).reshape(n_mo, n_basis)
+
+    # mo_overlap[i, j] = <ref_MO_i | tar_MO_j>  where both coefficient matrices
+    # are row-major (row = MO, col = AO): S_MO = C_rot · S_AO · C_tar^T
+    mo_overlap = C_rot_raw @ S_AO @ C_tar_raw.T
+
+    target_orbitals = []
+    warnings = []
+
+    print("Orbital Mapping Results:")
+    print("Reference -> Target (Overlap)")
+    for orb in ref_orbitals:
+        idx = orb - 1
+        best_matches = np.argsort(np.abs(mo_overlap[idx]))[::-1][:len(active_orbitals)]
+        best_match = second_best_match = None
+        for j, match in enumerate(best_matches):
+            if match + 1 not in target_orbitals:
+                best_match = match
+                if j + 1 < len(best_matches):
+                    second_best_match = best_matches[j + 1]
+                target_orbitals.append(match + 1)
+                break
+        overlap_value = mo_overlap[idx, best_match]
+        if abs(overlap_value) < 0.8 or abs(overlap_value) > 1.2:
+            warnings.append([orb, best_match + 1, overlap_value])
+        try:
+            print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}) "
+                  f"[second best match: {second_best_match+1:3d} "
+                  f"({mo_overlap[idx,second_best_match]:.4f})] "
+                  f"[original MO overlap: ({mo_overlap[idx,idx]:.4f}) "
+                  f"{list(best_matches).index(idx)+1:3d}]")
+        except Exception:
+            print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}) "
+                  f"[original MO overlap: ({mo_overlap[idx,idx]:.4f}) not in list]")
+
+    target_not_in_active_space = [t for t in target_orbitals if t not in active_orbitals]
+    active_space_not_in_target = [a for a in active_orbitals if a not in target_orbitals]
+
+    alter_path = os.path.join(target_dir, 'ALTER.txt')
+    with open(alter_path, 'w') as alterfile:
+        line = 'ALTER = ' + str(len(active_space_not_in_target)) + '; '
+        for i in range(len(active_space_not_in_target)):
+            line += '1 ' + str(target_not_in_active_space[i]) + ' ' + str(active_space_not_in_target[i]) + '; '
+        line += ' * Generated automatically\n'
+        if warnings:
+            line += '* WARNING some orbitals do not match. Check manually\n'
+            for w in warnings:
+                line += '* REF ' + str(w[0]) + '--> TARGET ' + str(w[1]) + '  (' + str(w[2]) + ')\n'
+            print(line)
+        alterfile.write(line)
+
 #===========================PARSING================================
 
 def parse_range_or_value(item_str):
@@ -624,11 +853,12 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Molecular Orbital Alignment Tool\n\n"
-            "This script takes one or more reference Molden files and a single target Molden file, "
+            "This script takes one or more reference Molden or HDF5 files and a single target file, "
             "computes the optimal rotational alignment (using a subset of atoms if requested), rotates "
             "the MO coefficients of the best-matching reference, and then calculates orbital overlaps "
-            "between the rotated reference and the target. Output files (rotate.csv, rotated.molden, ALTER.txt) "
-            "are saved in the same directory as the target file and a summary is printed to standard output."
+            "between the rotated reference and the target. Output files (rotate.csv, rotated.molden or "
+            "rotated.h5, ALTER.txt) are saved in the same directory as the target file and a summary is "
+            "printed to standard output."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
@@ -640,8 +870,9 @@ def main():
             "    --active_space 3,4-6,9 \\\n"
             "    --atoms 1,3-5,8\n\n"
             "Notes on Formats:\n"
-            "  --ref               Provide one or more reference Molden files (separated by spaces).\n"
-            "  --target            Provide exactly one target Molden file.\n"
+            "  --ref               Provide one or more reference Molden or HDF5 files (separated by spaces).\n"
+            "                       All files must be of the same type (all Molden or all HDF5).\n"
+            "  --target            Provide exactly one target Molden or HDF5 file.\n"
             "  --ref_orbitals      For each reference file, specify a list of orbitals (1-based indices):\n"
             "                       Use commas to separate individual orbitals, hyphens for ranges, and\n"
             "                       colons to separate different sublists when supplying multiple groups.\n"
@@ -658,9 +889,9 @@ def main():
         '--ref',
         required=True,
         nargs='+',
-        metavar='REF_MOLDEN',
+        metavar='REF_FILE',
         help=(
-            "List of one or more reference Molden files.\n"
+            "List of one or more reference Molden or HDF5 files.\n"
             "Example: --ref ref1.molden ref2.molden ref3.molden"
         )
     )
@@ -668,11 +899,11 @@ def main():
     parser.add_argument(
         '--target',
         required=True,
-        metavar='TARGET_MOLDEN',
+        metavar='TARGET_FILE',
         help=(
-            "Single target Molden file (input).\n"
-            "All output files (rotate.csv, rotated.molden, ALTER.txt) will be saved in the same directory\n"
-            "where this target file resides."
+            "Single target Molden or HDF5 file (input).\n"
+            "All output files (rotate.csv, rotated.molden/rotated.h5, ALTER.txt) will be saved in the same\n"
+            "directory where this target file resides."
         )
     )
 
@@ -722,42 +953,49 @@ def main():
 
     target_dir = os.path.dirname(os.path.abspath(args.target))
     if not os.path.isdir(target_dir):
-        # Se viene passato solo il nome del file (senza path), uso la cartella corrente
+        # If only a filename is passed (no path), use the current directory
         target_dir = os.getcwd()
 
-
-
     if len(args.ref) != len(args.ref_orbitals):
-        raise ValueError("Il numero di file in --ref deve corrispondere al numero di liste in --ref_orbitals")
+        raise ValueError("The number of files in --ref must match the number of lists in --ref_orbitals")
 
-    print("Reference molden files:", args.ref)
+    # Validate that all input files are of the same type (all HDF5 or all Molden)
+    all_h5 = all(is_h5_file(f) for f in args.ref) and is_h5_file(args.target)
+    all_molden = (not any(is_h5_file(f) for f in args.ref)) and (not is_h5_file(args.target))
+    if not all_h5 and not all_molden:
+        raise ValueError(
+            "All input files (--ref and --target) must be of the same type: "
+            "either all Molden (.molden) or all HDF5 (.h5/.hdf5)."
+        )
+    if all_h5 and not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to process HDF5 files: pip install h5py")
+
+    print("Reference files:", args.ref)
     print("Reference MOs:")
     for i, (ref_file, orbitals) in enumerate(zip(args.ref, args.ref_orbitals)):
         print(f"  {ref_file}: {orbitals}")
 
-    print("Target molden file:", args.target)
+    print("Target file:", args.target)
     print("Active space:", args.active_space)
+    print("Mode:", "HDF5" if all_h5 else "Molden")
 
     if args.atoms:
         print("Atoms selected for alignment:", args.atoms)
-        atom_list = np.array(args.atoms) -1
+        atom_list = np.array(args.atoms) - 1
     else:
         print("All atoms used for alignment.")
 
-
-    
     # Step 1: Compute optimal rotation among the references:
-    print("\nEvaluating file: "+args.target )
-    print("Calculating optimal rotation..." )
+    print("\nEvaluating file: " + args.target)
+    print("Calculating optimal rotation...")
+
+    tar_coords = extract_atom_coords(args.target)
 
     rmsd_list = []
     rotation_list = []
     for ref in args.ref:
 
         ref_coords = extract_atom_coords(ref)
-        # print('Ref coords:', ref_coords)
-        tar_coords = extract_atom_coords(args.target)
-        # print('Tar coords:', tar_coords)
 
         if args.atoms:
             ref_coords_trimmed = ref_coords[atom_list, :]
@@ -766,15 +1004,12 @@ def main():
             ref_coords_trimmed = ref_coords
             tar_coords_trimmed = tar_coords
 
-        # print('Ref coords trimmed:', ref_coords_trimmed)
-        # print('Tar coords trimmed:', tar_coords_trimmed)
-        
         # Center coordinates
         ref_centroid = compute_centroid(ref_coords_trimmed)
         tar_centroid = compute_centroid(tar_coords_trimmed)
         P = ref_coords_trimmed - ref_centroid
         Q = tar_coords_trimmed - tar_centroid
-        
+
         # Compute rotation matrix
         rotation = kabsch_rotation(P, Q)
         rotation_list.append(rotation)
@@ -792,17 +1027,37 @@ def main():
 
     rotate_path = os.path.join(target_dir, 'rotate.csv')
     np.savetxt(rotate_path, rotation, delimiter=',')
-    print("Rotation matrix saved to rotate.csv --> RMSD: "+str(best_rmsd)+' A.U. ('+best_ref+')')
-    
-    # Step 2: Create rotated Molden file
-    # print("Generating rotated Molden file...")
-    rotated_path = os.path.join(target_dir, 'rotated.molden')
-    create_rotated_molden(best_ref, rotated_path, rotation.T, tar_coords)
-    # print("Rotated file saved to rotated.molden")
-    
-    # Step 3: Compute orbital overlaps
+    print("Rotation matrix saved to rotate.csv --> RMSD: " + str(best_rmsd) + ' A.U. (' + best_ref + ')')
+
     print("Computing orbital overlaps...")
-    compute_orbital_overlaps(rotated_path, args.target, best_ref_orbitals, args.active_space)
+    if all_h5:
+        # Step 2 (HDF5): rotate MO coefficients in memory using the pre-computed
+        #                 AO basis information from the reference HDF5 file.
+        rotation_blocks = get_rotation_blocks_from_h5(best_ref)
+        with h5py.File(best_ref, 'r') as f:
+            # Read dimensions: AO_OVERLAP_MATRIX gives n_basis; MO_VECTORS total
+            # length = n_mo × n_basis (typically n_mo == n_basis for OpenMolcas output).
+            n_basis = int(np.sqrt(len(f['AO_OVERLAP_MATRIX'])))
+            n_mo = len(f['MO_VECTORS']) // n_basis
+            C_raw = np.array(f['MO_VECTORS']).reshape(n_mo, n_basis)
+        C_rot_raw = rotate_mo_coefficients_h5(C_raw, rotation_blocks, rotation.T)
+
+        # Step 2b (HDF5): save rotated MO coefficients to a new HDF5 file
+        rotated_h5_path = os.path.join(target_dir, 'rotated.h5')
+        write_rotated_h5(best_ref, rotated_h5_path, C_rot_raw)
+
+        # Step 3 (HDF5): compute overlaps using the AO overlap matrix stored in
+        #                 the target HDF5 file (no heavy analytical calculation).
+        compute_orbital_overlaps_h5(
+            C_rot_raw, args.target, best_ref_orbitals, args.active_space, target_dir
+        )
+    else:
+        # Step 2 (Molden): create rotated Molden file
+        rotated_path = os.path.join(target_dir, 'rotated.molden')
+        create_rotated_molden(best_ref, rotated_path, rotation.T, tar_coords)
+
+        # Step 3 (Molden): compute orbital overlaps via orbkit
+        compute_orbital_overlaps(rotated_path, args.target, best_ref_orbitals, args.active_space)
 
 if __name__ == "__main__":
     main()
