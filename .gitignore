@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Script output artefacts (regenerated on each run)
+test/phenol_scf/ALTER.txt
+test/phenol_scf/rotate.csv
+test/phenol_scf/rotated.molden
+
+# Pytest
+.pytest_cache/
