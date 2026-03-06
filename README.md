@@ -35,7 +35,8 @@ The workflow implemented by this tool is:
 - [NumPy](https://numpy.org/) **≥ 1.20**
 - [SciPy](https://scipy.org/) **≥ 1.7, < 1.15** – SciPy ≥ 1.15 changes the `sph_harm` API and breaks sphecerix 0.5.0
 - [sphecerix](https://github.com/ifilot/sphecerix) **== 0.5.0** – Wigner D-matrix library for real (tesseral) spherical harmonics
-- **orbkit** (modified) – included in this repository as a Git submodule; the upstream version has been patched to correctly parse Molden files produced by **OpenMolcas**. Only required when using Molden input files.
+- [Cython](https://cython.org/) – required to compile the C extensions inside orbkit at install time
+- **orbkit** (modified) – included in this repository as a Git submodule; the upstream version has been patched to correctly parse Molden files produced by **OpenMolcas**. Only required when using Molden input files. Pulls in [matplotlib](https://matplotlib.org/) and [scikit-image](https://scikit-image.org/) as dependencies.
 - [h5py](https://www.h5py.org/) **≥ 3.0** – required only when using OpenMolcas HDF5 (`.h5`) input files
 
 ---
@@ -55,19 +56,35 @@ If you already cloned without `--recurse-submodules`, initialise the submodule a
 git submodule update --init --recursive
 ```
 
-### 2. Install the modified orbkit
+### 2. Install build prerequisites for orbkit
 
-The modified orbkit lives in the `orbkit/` subdirectory. Install it in editable mode so that any local patches are picked up automatically:
+orbkit contains Cython extensions that must be compiled during installation.
+NumPy is also required at build time (its header path is queried in `setup.py`).
+Install both before attempting to install orbkit:
+
+```bash
+pip install "numpy>=1.20" cython
+```
+
+### 3. Install the modified orbkit
+
+The modified orbkit lives in the `orbkit/` subdirectory. Install it in editable
+mode so that any local patches are picked up automatically. This step also
+installs orbkit's runtime dependencies (matplotlib, scikit-image, h5py, …)
+automatically:
 
 ```bash
 pip install -e orbkit/
 ```
 
-### 3. Install the remaining Python dependencies
+### 4. Install the remaining Python dependencies
 
 ```bash
-pip install "numpy>=1.20" "scipy>=1.7,<1.15" "sphecerix==0.5.0" "h5py>=3.0"
+pip install "scipy>=1.7,<1.15" "sphecerix==0.5.0" "h5py>=3.0"
 ```
+
+> **Why `scipy<1.15`?** SciPy 1.15 changed the `sph_harm` API in a way that
+> breaks sphecerix 0.5.0. Constraining scipy to `<1.15` avoids the issue.
 
 ---
 
