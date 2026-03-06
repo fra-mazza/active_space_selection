@@ -83,9 +83,37 @@ automatically.
 > (which already has Cython and NumPy from step 2) instead of creating a fresh
 > one, so the build succeeds.
 
+**Linux / Windows (WSL):**
+
 ```bash
 pip install --no-build-isolation -e orbkit/
 ```
+
+**macOS – Apple's clang does not support `-fopenmp`.**
+orbkit's `detci` sub-module is compiled with OpenMP.  Apple's default
+`clang` rejects the `-fopenmp` flag, so you must point the build at a
+GCC that supports it.
+
+*Conda users* (recommended — GCC is already available inside the conda
+environment after this one-liner):
+
+```bash
+conda install -c conda-forge gcc
+CC=gcc pip install --no-build-isolation -e orbkit/
+```
+
+*Homebrew users* (if you prefer not to use conda-forge's GCC):
+
+```bash
+brew install gcc
+# Homebrew installs gcc as gcc-N (e.g. gcc-14); pick whichever is present:
+CC=$(ls /opt/homebrew/bin/gcc-* | sort -V | tail -1) pip install --no-build-isolation -e orbkit/
+```
+
+> **Why `CC=gcc`?**  Setting the `CC` environment variable tells the
+> build system to use GCC instead of Apple's clang.  GCC ships with
+> built-in OpenMP support so the `-fopenmp` flag that orbkit passes
+> when compiling `detci/cy_ci.pyx` is accepted without error.
 
 ### 4. Install the remaining Python dependencies
 
