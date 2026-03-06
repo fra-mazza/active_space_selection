@@ -16,7 +16,6 @@ import argparse
 import re
 from scipy.spatial.transform import Rotation as R
 from sphecerix import tesseral_wigner_D
-from orbkit import read, analytical_integrals
 
 try:
     import h5py
@@ -502,6 +501,7 @@ def extract_atom_coords(filename):
 
 def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orbitals):
     """Calculate and print orbital overlaps"""
+    from orbkit import read, analytical_integrals
     qc_rot = read.main_read(rotated_file, itype='molden', all_mo=True)
     qc_tar = read.main_read(target_file, itype='molden', all_mo=True)
     
@@ -673,6 +673,50 @@ def rotate_mo_coefficients_h5(C_raw, rotation_blocks, rotation_matrix):
         C_rot[:, ao_indices] = rotated_sph[:, inv_perm]  # restore h5 m-order
 
     return C_rot
+
+
+def write_rotated_h5(ref_h5, output_h5, C_rot, tar_coords):
+    """
+    Write a new OpenMolcas HDF5 file with rotated MO coefficients and target
+    atomic coordinates, analogously to the ``rotated.molden`` file produced in
+    the Molden workflow.
+
+    All datasets from the reference file are copied to the output file, with the
+    following two replacements:
+
+    * ``MO_VECTORS`` – replaced by *C_rot* (stored as a flat 1-D array, row-major).
+    * ``CENTER_COORDINATES`` – replaced by *tar_coords* (the target geometry).
+
+    Parameters
+    ----------
+    ref_h5 : str
+        Path to the reference OpenMolcas HDF5 file (used as a template).
+    output_h5 : str
+        Path for the output HDF5 file to be written.
+    C_rot : ndarray, shape (n_mo, n_basis)
+        Rotated MO coefficients (row = MO, col = AO).
+    tar_coords : ndarray, shape (n_atoms, 3)
+        Target atomic coordinates (Bohr) to embed in the output file.
+    """
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to write HDF5 files: pip install h5py")
+    with h5py.File(ref_h5, 'r') as src, h5py.File(output_h5, 'w') as dst:
+        # Copy root-level file attributes (e.g. MOLCAS_MODULE, NBAS, …)
+        for attr_name, attr_val in src.attrs.items():
+            dst.attrs[attr_name] = attr_val
+        # Copy all top-level datasets, replacing MO_VECTORS and CENTER_COORDINATES
+        for key in src:
+            if key == 'MO_VECTORS':
+                ds = dst.create_dataset('MO_VECTORS', data=C_rot.ravel())
+                for attr_name, attr_val in src[key].attrs.items():
+                    ds.attrs[attr_name] = attr_val
+            elif key == 'CENTER_COORDINATES':
+                ds = dst.create_dataset('CENTER_COORDINATES', data=tar_coords)
+                for attr_name, attr_val in src[key].attrs.items():
+                    ds.attrs[attr_name] = attr_val
+            else:
+                src.copy(key, dst)
+    print(f"Rotated HDF5 file written to {output_h5}")
 
 
 def _write_alter_file(target_orbitals, active_orbitals, warnings, target_dir):
@@ -1018,6 +1062,10 @@ def main():
             n = int(np.sqrt(len(f['MO_VECTORS'])))
             C_raw = np.array(f['MO_VECTORS']).reshape(n, n)
         C_rot_raw = rotate_mo_coefficients_h5(C_raw, rotation_blocks, rotation.T)
+
+        # Step 2b (HDF5): write rotated HDF5 file (analogous to rotated.molden)
+        rotated_h5_path = os.path.join(target_dir, 'rotated.h5')
+        write_rotated_h5(best_ref, rotated_h5_path, C_rot_raw, tar_coords)
 
         # Step 3 (HDF5): compute overlaps using the AO overlap matrix stored in
         #                 the target HDF5 file (no heavy analytical calculation).

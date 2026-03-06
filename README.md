@@ -23,7 +23,8 @@ The workflow implemented by this tool is:
 | File | Contents |
 |---|---|
 | `rotate.csv` | 3×3 rotation matrix (CSV) used to align the reference onto the target |
-| `rotated.molden` | Molden file of the reference with rotated MO coefficients and target coordinates |
+| `rotated.molden` | *(Molden mode only)* Molden file of the reference with rotated MO coefficients and target coordinates |
+| `rotated.h5` | *(HDF5 mode only)* HDF5 file of the reference with rotated MO coefficients and target coordinates |
 | `ALTER.txt` | OpenMolcas `ALTER` keyword block for reordering the target active space |
 
 ---
@@ -31,11 +32,11 @@ The workflow implemented by this tool is:
 ## Requirements
 
 - **Python ≥ 3.8**
-- [NumPy](https://numpy.org/)
-- [SciPy](https://scipy.org/)
-- [sphecerix](https://github.com/ifilot/sphecerix) – Wigner D-matrix library for real (tesseral) spherical harmonics
+- [NumPy](https://numpy.org/) **≥ 1.20**
+- [SciPy](https://scipy.org/) **≥ 1.7, < 1.15** – SciPy ≥ 1.15 changes the `sph_harm` API and breaks sphecerix 0.5.0
+- [sphecerix](https://github.com/ifilot/sphecerix) **== 0.5.0** – Wigner D-matrix library for real (tesseral) spherical harmonics
 - **orbkit** (modified) – included in this repository as a Git submodule; the upstream version has been patched to correctly parse Molden files produced by **OpenMolcas**. Only required when using Molden input files.
-- [h5py](https://www.h5py.org/) – required only when using OpenMolcas HDF5 (`.h5`) input files
+- [h5py](https://www.h5py.org/) **≥ 3.0** – required only when using OpenMolcas HDF5 (`.h5`) input files
 
 ---
 
@@ -65,7 +66,7 @@ pip install -e orbkit/
 ### 3. Install the remaining Python dependencies
 
 ```bash
-pip install numpy scipy sphecerix h5py
+pip install "numpy>=1.20" "scipy>=1.7,<1.15" "sphecerix==0.5.0" "h5py>=3.0"
 ```
 
 ---
@@ -124,7 +125,7 @@ python active_space_selection.py \
     --active_space "$ACTIVE"
 ```
 
-The output `rotate.csv` and `ALTER.txt` are written to `test/phenol_scf/`.  No `rotated.molden` is generated in HDF5 mode.
+The output `rotate.csv`, `rotated.h5`, and `ALTER.txt` are written to `test/phenol_scf/`.
 
 ---
 

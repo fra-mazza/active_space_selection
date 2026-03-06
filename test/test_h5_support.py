@@ -280,6 +280,102 @@ class TestMixedInputRejected:
         assert "same type" in combined
 
 
+class TestWriteRotatedH5:
+    """Tests for the write_rotated_h5 function."""
+
+    def test_rotated_h5_written_by_script(self, h5_result):
+        """The HDF5 workflow must produce a rotated.h5 output file."""
+        _, tmpdir = h5_result
+        rotated_h5 = os.path.join(tmpdir, "rotated.h5")
+        assert os.path.isfile(rotated_h5), "rotated.h5 was not written by the HDF5 workflow"
+
+    def test_rotated_h5_mo_vectors_differ_from_ref(self, h5_result):
+        """MO_VECTORS in rotated.h5 must differ from the unrotated reference."""
+        import h5py
+        _, tmpdir = h5_result
+        rotated_h5 = os.path.join(tmpdir, "rotated.h5")
+        with h5py.File(rotated_h5, 'r') as f_rot, h5py.File(REF_H5, 'r') as f_ref:
+            C_rot = np.array(f_rot['MO_VECTORS'])
+            C_ref = np.array(f_ref['MO_VECTORS'])
+        assert not np.allclose(C_rot, C_ref, atol=1e-8), (
+            "rotated.h5 MO_VECTORS are identical to the unrotated reference"
+        )
+
+    def test_rotated_h5_coords_match_target(self, h5_result):
+        """CENTER_COORDINATES in rotated.h5 must match the target geometry."""
+        import h5py
+        _, tmpdir = h5_result
+        rotated_h5 = os.path.join(tmpdir, "rotated.h5")
+        with h5py.File(rotated_h5, 'r') as f_rot, h5py.File(TAR_H5, 'r') as f_tar:
+            coords_rot = np.array(f_rot['CENTER_COORDINATES'])
+            coords_tar = np.array(f_tar['CENTER_COORDINATES'])
+        np.testing.assert_allclose(coords_rot, coords_tar, atol=1e-8,
+                                   err_msg="rotated.h5 coordinates do not match target")
+
+    def test_write_rotated_h5_unit(self, tmp_path):
+        """Unit test for write_rotated_h5: output file contains expected datasets."""
+        import h5py
+        from active_space_selection import (
+            write_rotated_h5,
+            get_rotation_blocks_from_h5,
+            rotate_mo_coefficients_h5,
+            extract_atom_coords_h5,
+        )
+        blocks = get_rotation_blocks_from_h5(REF_H5)
+        with h5py.File(REF_H5, 'r') as f:
+            n = int(np.sqrt(len(f['MO_VECTORS'])))
+            C_raw = np.array(f['MO_VECTORS']).reshape(n, n)
+        I3 = np.eye(3)
+        C_rot = rotate_mo_coefficients_h5(C_raw, blocks, I3)
+        tar_coords = extract_atom_coords_h5(TAR_H5)
+
+        out_path = str(tmp_path / "rotated_test.h5")
+        write_rotated_h5(REF_H5, out_path, C_rot, tar_coords)
+
+        assert os.path.isfile(out_path)
+        with h5py.File(out_path, 'r') as f, h5py.File(REF_H5, 'r') as f_ref:
+            assert 'MO_VECTORS' in f
+            assert 'CENTER_COORDINATES' in f
+            np.testing.assert_allclose(np.array(f['MO_VECTORS']), C_rot.ravel(), atol=1e-12)
+            np.testing.assert_allclose(np.array(f['CENTER_COORDINATES']), tar_coords, atol=1e-12)
+            # Root-level attributes must be preserved
+            for attr in f_ref.attrs:
+                assert attr in f.attrs, f"Root attribute '{attr}' missing from rotated.h5"
+            # Dataset attributes must be preserved for replaced datasets
+            for ds_name in ('MO_VECTORS', 'CENTER_COORDINATES'):
+                for attr in f_ref[ds_name].attrs:
+                    assert attr in f[ds_name].attrs, (
+                        f"Attribute '{attr}' of dataset '{ds_name}' missing from rotated.h5"
+                    )
+
+
+class TestLazyOrbkitImport:
+    """Verify that orbkit is not imported at module load time."""
+
+    def test_orbkit_not_imported_at_module_level(self):
+        """
+        active_space_selection should be importable without orbkit being installed,
+        as long as no Molden workflow function is called.
+        """
+        import importlib
+        import sys
+        # Remove orbkit from sys.modules if present to simulate it being absent
+        orbkit_mods = [k for k in sys.modules if k == 'orbkit' or k.startswith('orbkit.')]
+        saved = {k: sys.modules.pop(k) for k in orbkit_mods}
+        # Re-import the module; this should not raise even without orbkit
+        mod_name = 'active_space_selection'
+        if mod_name in sys.modules:
+            del sys.modules[mod_name]
+        try:
+            import active_space_selection  # noqa: F401 – should not raise
+        except ImportError as exc:
+            raise AssertionError(
+                f"active_space_selection raised ImportError on import (orbkit missing): {exc}"
+            ) from exc
+        finally:
+            sys.modules.update(saved)
+
+
 # ───────────────────────── standalone runner ─────────────────────────────────
 
 if __name__ == "__main__":
