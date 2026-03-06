@@ -60,10 +60,10 @@ git submodule update --init --recursive
 
 orbkit contains Cython extensions that must be compiled during installation.
 NumPy is also required at build time (its header path is queried in `setup.py`).
-Install both before attempting to install orbkit:
+Install both — along with setuptools — before attempting to install orbkit:
 
 ```bash
-pip install "numpy>=1.20" cython
+pip install "numpy>=1.20" cython setuptools
 ```
 
 ### 3. Install the modified orbkit
@@ -71,10 +71,20 @@ pip install "numpy>=1.20" cython
 The modified orbkit lives in the `orbkit/` subdirectory. Install it in editable
 mode so that any local patches are picked up automatically. This step also
 installs orbkit's runtime dependencies (matplotlib, scikit-image, h5py, …)
-automatically:
+automatically.
+
+> **Important – use `--no-build-isolation`.**  `orbkit/setup.py` imports
+> `Cython` at module level.  Modern pip (≥ 21.3) runs `setup.py` in a fresh,
+> isolated environment by default (PEP 517), and in that fresh environment
+> Cython is not yet available, which causes the error:
+> *"Getting requirements to build editable did not run successfully –
+> ModuleNotFoundError: No module named 'Cython'"*.
+> The `--no-build-isolation` flag tells pip to use the **current** environment
+> (which already has Cython and NumPy from step 2) instead of creating a fresh
+> one, so the build succeeds.
 
 ```bash
-pip install -e orbkit/
+pip install --no-build-isolation -e orbkit/
 ```
 
 ### 4. Install the remaining Python dependencies
