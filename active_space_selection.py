@@ -499,7 +499,7 @@ def extract_atom_coords(filename):
 
 # ======================== Overlap Calculation =================================
 
-def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orbitals):
+def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orbitals, alter_path):
     """Calculate and print orbital overlaps"""
     from orbkit import read, analytical_integrals
     qc_rot = read.main_read(rotated_file, itype='molden', all_mo=True)
@@ -556,9 +556,7 @@ def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orb
        if activeMO not in target_orbitals:
            active_space_not_in_target.append(activeMO)
        
-    # Save alter file in the same dir as the target molden
-    target_dir = os.path.dirname(os.path.abspath(target_file))
-    alter_path = os.path.join(target_dir, 'ALTER.txt')
+    # Save alter file
     with open(alter_path, 'w') as alterfile:
        line = 'ALTER = '+str(len(active_space_not_in_target))+'; '
        for i in range(len(active_space_not_in_target)):
@@ -719,12 +717,11 @@ def write_rotated_h5(ref_h5, output_h5, C_rot, tar_coords):
     print(f"Rotated HDF5 file written to {output_h5}")
 
 
-def _write_alter_file(target_orbitals, active_orbitals, warnings, target_dir):
-    """Write the OpenMolcas ALTER keyword block to ALTER.txt."""
+def _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path):
+    """Write the OpenMolcas ALTER keyword block to *alter_path*."""
     target_not_in_active = [t for t in target_orbitals if t not in active_orbitals]
     active_not_in_target = [a for a in active_orbitals if a not in target_orbitals]
 
-    alter_path = os.path.join(target_dir, 'ALTER.txt')
     with open(alter_path, 'w') as alterfile:
         line = 'ALTER = ' + str(len(active_not_in_target)) + '; '
         for i in range(len(active_not_in_target)):
@@ -739,10 +736,10 @@ def _write_alter_file(target_orbitals, active_orbitals, warnings, target_dir):
 
 
 def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbitals,
-                                 target_dir):
+                                 alter_path):
     """
     Compute MO overlaps using the pre-computed AO overlap matrix stored inside
-    the target HDF5 file, then write ``ALTER.txt``.
+    the target HDF5 file, then write the ALTER file.
 
     This avoids the heavy analytical AO-overlap calculation performed by orbkit
     when Molden files are used.
@@ -757,8 +754,8 @@ def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbit
         1-based indices of the reference active-space orbitals.
     active_orbitals : list of int
         1-based indices of the target active space.
-    target_dir : str
-        Directory where ``ALTER.txt`` will be written.
+    alter_path : str
+        Full path where the ALTER file will be written.
     """
     if not _H5PY_AVAILABLE:
         raise ImportError("h5py is required to read HDF5 files: pip install h5py")
@@ -801,7 +798,7 @@ def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbit
                   f"({mo_overlap[idx,second_best_match]:.4f})] "
                   f"[original MO overlap: ({mo_overlap[idx,idx]:.4f}) not in list]")
 
-    _write_alter_file(target_orbitals, active_orbitals, warnings, target_dir)
+    _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path)
 
 
 #===========================PARSING================================
@@ -878,7 +875,8 @@ def main():
             "computes the optimal rotational alignment (using a subset of atoms if requested), rotates "
             "the MO coefficients of the best-matching reference, and then calculates orbital overlaps "
             "between the rotated reference and the target. Output files (rotate.csv, rotated.molden, ALTER.txt) "
-            "are saved in the same directory as the target file and a summary is printed to standard output."
+            "are saved in the same directory as the target file by default (use --alter to specify a custom path "
+            "for the ALTER file) and a summary is printed to standard output."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
@@ -922,8 +920,8 @@ def main():
         metavar='TARGET_FILE',
         help=(
             "Single target Molden or HDF5 file (input).\n"
-            "All output files (rotate.csv, rotated.molden, ALTER.txt) will be saved in the same directory\n"
-            "where this target file resides."
+            "All output files (rotate.csv, rotated.molden) will be saved in the same directory\n"
+            "where this target file resides. The ALTER file is saved there too unless --alter is used."
         )
     )
 
@@ -969,12 +967,36 @@ def main():
         )
     )
 
+    parser.add_argument(
+        '--alter',
+        required=False,
+        default=None,
+        metavar='ALTER_FILE',
+        help=(
+            "(Optional) Name or path for the ALTER file.\n"
+            "If only a filename is given (e.g. ALTER1.txt), the file is written in the\n"
+            "same directory as the target file.\n"
+            "If a full path is given (e.g. /some/dir/ALTER1.txt), that path is used.\n"
+            "If omitted, ALTER.txt is written in the same directory as the target file."
+        )
+    )
+
     args = parser.parse_args()
 
     target_dir = os.path.dirname(os.path.abspath(args.target))
     if not os.path.isdir(target_dir):
         # Se viene passato solo il nome del file (senza path), uso la cartella corrente
         target_dir = os.getcwd()
+
+    if args.alter:
+        # If only a filename was given (no directory component), place it next to
+        # the target file, so that e.g. --alter ALTER1.txt saves in target_dir.
+        if os.path.dirname(args.alter):
+            alter_path = args.alter
+        else:
+            alter_path = os.path.join(target_dir, args.alter)
+    else:
+        alter_path = os.path.join(target_dir, 'ALTER.txt')
 
 
 
@@ -1070,7 +1092,7 @@ def main():
         # Step 3 (HDF5): compute overlaps using the AO overlap matrix stored in
         #                 the target HDF5 file (no heavy analytical calculation).
         compute_orbital_overlaps_h5(
-            C_rot_raw, args.target, best_ref_orbitals, args.active_space, target_dir
+            C_rot_raw, args.target, best_ref_orbitals, args.active_space, alter_path
         )
     else:
         # Step 2 (Molden): create rotated Molden file
@@ -1078,7 +1100,7 @@ def main():
         create_rotated_molden(best_ref, rotated_path, rotation.T, tar_coords)
 
         # Step 3 (Molden): compute orbital overlaps via orbkit
-        compute_orbital_overlaps(rotated_path, args.target, best_ref_orbitals, args.active_space)
+        compute_orbital_overlaps(rotated_path, args.target, best_ref_orbitals, args.active_space, alter_path)
 
 if __name__ == "__main__":
     main()
