@@ -973,7 +973,10 @@ def main():
         default=None,
         metavar='ALTER_FILE',
         help=(
-            "(Optional) Path where the ALTER file will be saved.\n"
+            "(Optional) Name or path for the ALTER file.\n"
+            "If only a filename is given (e.g. ALTER1.txt), the file is written in the\n"
+            "same directory as the target file.\n"
+            "If a full path is given (e.g. /some/dir/ALTER1.txt), that path is used.\n"
             "If omitted, ALTER.txt is written in the same directory as the target file."
         )
     )
@@ -985,7 +988,15 @@ def main():
         # Se viene passato solo il nome del file (senza path), uso la cartella corrente
         target_dir = os.getcwd()
 
-    alter_path = args.alter if args.alter else os.path.join(target_dir, 'ALTER.txt')
+    if args.alter:
+        # If only a filename was given (no directory component), place it next to
+        # the target file, so that e.g. --alter ALTER1.txt saves in target_dir.
+        if os.path.dirname(args.alter):
+            alter_path = args.alter
+        else:
+            alter_path = os.path.join(target_dir, args.alter)
+    else:
+        alter_path = os.path.join(target_dir, 'ALTER.txt')
 
 
 
