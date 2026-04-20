@@ -154,8 +154,8 @@ def parse_molden_gto_for_p_blocks(filename):
             if current_atom is None:
                 raise ValueError("Found shell data before atom index in [GTO] section.")
             if orb == "p":
-                # OpenMolcas/Molden convention used here follows the same real-p ordering
-                # assumed elsewhere in this repository: [component_x, component_y, component_z].
+                # Canonical real-p component ordering used by this script/repository:
+                # [component_x, component_y, component_z].
                 p_blocks_by_atom.setdefault(current_atom, []).append([ao_idx, ao_idx + 1, ao_idx + 2])
             ao_idx += nfunc
             i += nprim
@@ -214,7 +214,7 @@ def h5_p_blocks_by_atom(bf_ids, natoms):
     for (atom_1based, _shell), items in groups.items():
         m_to_idx = {m: idx for idx, m in items}
         if all(m in m_to_idx for m in (1, -1, 0)):
-            # Reconstruct the same real-p component order used in the Molden branch.
+            # Reconstruct the same real-p component order used in the Molden code path.
             p_blocks.setdefault(atom_1based, []).append([m_to_idx[1], m_to_idx[-1], m_to_idx[0]])
     return p_blocks
 
@@ -249,7 +249,8 @@ def normalize_projectors(projectors, ao_overlap):
 
 
 def rank_pi_orbitals(C_mo, ao_overlap, projectors, top_n):
-    # score[k] = sum_i |<MO_k|p_i>| where <MO|p> = C_mo[k] @ ao_overlap @ p
+    # score[k] = sum_i |<MO_k|p_i>|, with p_i the i-th normalized projector vector.
+    # Here <MO|p> = C_mo[k] @ ao_overlap @ p.
     if not projectors:
         return []
     proj_mat = np.stack([p for _, p in projectors], axis=1)  # (nbasis, nproj)
