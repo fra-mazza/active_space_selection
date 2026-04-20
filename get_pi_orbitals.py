@@ -140,7 +140,8 @@ def parse_molden_gto_for_p_blocks(filename):
         if not line:
             continue
 
-        atom_header = re.match(r"^(\d+)(?:\s+\d+)?$", line)
+        # Molden [GTO] atom header can be "atom_index" or "atom_index 0".
+        atom_header = re.match(r"^(\d+)(?:\s+(\d+))?$", line)
         if atom_header:
             current_atom = int(atom_header.group(1))
             continue
@@ -153,7 +154,8 @@ def parse_molden_gto_for_p_blocks(filename):
             if current_atom is None:
                 raise ValueError("Found shell data before atom index in [GTO] section.")
             if orb == "p":
-                # Molden p ordering assumed as [px, py, pz].
+                # Molden p ordering is assumed as [m=+1, m=-1, m=0], i.e. [px, py, pz]
+                # in the OpenMolcas-style convention used in this repository.
                 p_blocks_by_atom.setdefault(current_atom, []).append([ao_idx, ao_idx + 1, ao_idx + 2])
             ao_idx += nfunc
             i += nprim
@@ -212,7 +214,7 @@ def h5_p_blocks_by_atom(bf_ids, natoms):
     for (atom_1based, _shell), items in groups.items():
         m_to_idx = {m: idx for idx, m in items}
         if all(m in m_to_idx for m in (1, -1, 0)):
-            # Map [nx, ny, nz] onto [m=+1, m=-1, m=0].
+            # Map normal components [nx, ny, nz] onto [m=+1, m=-1, m=0] ~= [px, py, pz].
             p_blocks.setdefault(atom_1based, []).append([m_to_idx[1], m_to_idx[-1], m_to_idx[0]])
     return p_blocks
 
@@ -249,7 +251,7 @@ def normalize_projectors(projectors, ao_overlap):
 
 
 def rank_pi_orbitals(C_mo, ao_overlap, projectors, top_n):
-    # score[m] = sum_i |<MO_m|p_i>| where <MO|p> = C_mo[m] S_AO p
+    # score[m] = sum_i |<MO_m|p_i>| where <MO|p> = C_mo[m] @ ao_overlap @ p
     if not projectors:
         return []
     proj_mat = np.stack([p for _, p in projectors], axis=1)  # (nbasis, nproj)
