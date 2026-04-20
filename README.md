@@ -167,34 +167,28 @@ reports the maximum and RMS values.  If the maximum distance exceeds
 `--planarity_threshold` a `WARNING` is printed: either the selected atoms are
 genuinely non-planar, or the wrong atoms were chosen.
 
-#### Step 2 – Building the perpendicular p projectors
+#### Step 2 – Building one perpendicular p projector per atom
 
 For every selected atom that has at least one contracted p-type shell in the
-basis, one projector vector is built for each such shell:
+basis, a **single** projector vector is built by combining all available
+p-shells on that atom:
 
 ```
 p_⊥ = n_x · px + n_y · py + n_z · pz
 ```
 
-where `px`, `py`, `pz` are the three Cartesian AO basis functions of that
+where `px`, `py`, `pz` are the three Cartesian AO basis functions of each
 contracted p-shell, and `(n_x, n_y, n_z)` are the components of the plane
-normal.
+normal.  If an atom has multiple contracted p-shells, this same directional
+combination is included for each shell and collected into one atom-localized
+projector.
 
 This linear combination picks out the component of the p-orbital that points
 **perpendicularly** to the molecular plane, which is the defining character of
 a π orbital.
 
-**Why one projector per contracted shell, not one per atom?**
-Atoms in a polarised or augmented basis set may carry more than one contracted
-p-type shell (e.g. a valence shell and a diffuse or polarisation shell).  Each
-contributes independently to the π space, so each is given its own projector.
-The contributions are later *summed* in the π score (Step 4).
-
-**Why not just average the p shells?**
-Averaging would conflate shells of very different spatial extent.  Treating
-them separately lets the score reflect the combined π weight across all radial
-functions on each atom, and preserves the meaning of the individual shell
-overlaps.
+This gives one projector orbital per selected atom (when p-shells exist), which
+is useful for direct atom-by-atom inspection of π character.
 
 #### Step 3 – Projector normalisation using the AO overlap matrix
 
@@ -219,8 +213,8 @@ by OpenMolcas, which is faster and avoids calling orbkit.
 #### Step 4 – Computing π character of each MO and ranking
 
 Given the full MO coefficient matrix **C** (rows = MOs, columns = AOs) and the
-set of normalised projectors {p̂_⊥,i}, the overlap of MO *k* with projector *i*
-is:
+set of normalised per-atom projectors {p̂_⊥,i}, the overlap of MO *k* with
+projector *i* is:
 
 ```
 ⟨MO_k | p̂_⊥,i⟩ = C_k · S_AO · p̂_⊥,i
@@ -229,11 +223,19 @@ is:
 The **π score** of MO *k* is the sum of absolute overlaps over all projectors:
 
 ```
-score(k) = Σ_i |⟨MO_k | p̂_⊥,i⟩|
+score(k) = Σ_atoms i |⟨MO_k | p̂_⊥,i⟩|
 ```
 
 MOs are then sorted in descending order of score and the top `--top_n` are
 printed.
+
+The script also writes the projector orbitals actually used for scoring:
+
+- `pi_projectors.molden` when `--target` is Molden
+- `pi_projectors.h5` when `--target` is HDF5
+
+Each projector is stored as one MO, so selecting 7 atoms with available
+p-shells produces 7 projector MOs.
 
 **Why use all AO basis functions and not only the p-type block?**
 An MO is a linear combination of *all* basis functions:
