@@ -20,7 +20,10 @@ except ImportError:  # pragma: no cover
     _H5PY_AVAILABLE = False
 
 
+# Number of real AO components per shell (2*l+1): s=1, p=3, d=5, ...
 L_TO_NFUNCS = {"s": 1, "p": 3, "d": 5, "f": 7, "g": 9, "h": 11}
+# Numerical guard for near-zero projector norms in AO-overlap metric.
+PROJECTOR_NORM_EPS = 1e-14
 
 
 def parse_range_or_value(item_str):
@@ -242,8 +245,8 @@ def build_pi_projectors(nbasis, p_blocks_by_atom, selected_atoms, normal):
 def normalize_projectors(projectors, ao_overlap):
     normed = []
     for atom, vec in projectors:
-        n2 = float(vec @ ao_overlap @ vec)
-        if n2 > 1e-14:
+            n2 = float(vec @ ao_overlap @ vec)
+        if n2 > PROJECTOR_NORM_EPS:
             normed.append((atom, vec / np.sqrt(n2)))
     return normed
 
@@ -310,7 +313,7 @@ def main():
 
     print("Target file:", args.target)
     print("Selected atoms (1-based):", selected)
-    print(f"Best-fit plane normal: [{normal[0]: .6f}, {normal[1]: .6f}, {normal[2]: .6f}]")
+    print(f"Best-fit plane normal: [{normal[0]:+.6f}, {normal[1]:+.6f}, {normal[2]:+.6f}]")
     print(f"Planarity check: max distance = {np.max(distances):.6f}, RMS distance = {np.sqrt(np.mean(distances**2)):.6f}")
     if np.max(distances) > args.planarity_threshold:
         print(
