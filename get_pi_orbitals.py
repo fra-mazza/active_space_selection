@@ -154,8 +154,8 @@ def parse_molden_gto_for_p_blocks(filename):
             if current_atom is None:
                 raise ValueError("Found shell data before atom index in [GTO] section.")
             if orb == "p":
-                # Molden p ordering is assumed as [m=+1, m=-1, m=0], i.e. [px, py, pz]
-                # in the OpenMolcas-style convention used in this repository.
+                # OpenMolcas/Molden convention used here follows the same real-p ordering
+                # assumed elsewhere in this repository: [component_x, component_y, component_z].
                 p_blocks_by_atom.setdefault(current_atom, []).append([ao_idx, ao_idx + 1, ao_idx + 2])
             ao_idx += nfunc
             i += nprim
@@ -214,7 +214,7 @@ def h5_p_blocks_by_atom(bf_ids, natoms):
     for (atom_1based, _shell), items in groups.items():
         m_to_idx = {m: idx for idx, m in items}
         if all(m in m_to_idx for m in (1, -1, 0)):
-            # Map normal components [nx, ny, nz] onto [m=+1, m=-1, m=0] ~= [px, py, pz].
+            # Reconstruct the same real-p component order used in the Molden branch.
             p_blocks.setdefault(atom_1based, []).append([m_to_idx[1], m_to_idx[-1], m_to_idx[0]])
     return p_blocks
 
@@ -234,9 +234,7 @@ def build_pi_projectors(nbasis, p_blocks_by_atom, selected_atoms, normal):
     for atom in selected_atoms:
         for block in p_blocks_by_atom.get(atom, []):
             vec = np.zeros(nbasis, dtype=float)
-            vec[block[0]] = normal[0]
-            vec[block[1]] = normal[1]
-            vec[block[2]] = normal[2]
+            vec[block] = normal
             projectors.append((atom, vec))
     return projectors
 
@@ -251,7 +249,7 @@ def normalize_projectors(projectors, ao_overlap):
 
 
 def rank_pi_orbitals(C_mo, ao_overlap, projectors, top_n):
-    # score[m] = sum_i |<MO_m|p_i>| where <MO|p> = C_mo[m] @ ao_overlap @ p
+    # score[k] = sum_i |<MO_k|p_i>| where <MO|p> = C_mo[k] @ ao_overlap @ p
     if not projectors:
         return []
     proj_mat = np.stack([p for _, p in projectors], axis=1)  # (nbasis, nproj)
