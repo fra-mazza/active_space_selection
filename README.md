@@ -129,6 +129,139 @@ The output `rotate.csv`, `rotated.h5`, and `ALTER.txt` are written to `test/phen
 
 ---
 
+## Pi-orbital ranking for planar systems
+
+The repository now also provides `get_pi_orbitals.py`, a lightweight helper to
+identify MOs with the largest π-character for a selected planar fragment
+(e.g. aromatic ring atoms).
+
+### Usage
+
+```bash
+python get_pi_orbitals.py \
+    --target <target.molden|target.h5> \
+    --atoms <atom_list> \
+    [--top_n 20] \
+    [--planarity_threshold 0.10]
+```
+
+### Arguments
+
+| Argument | Required | Description |
+|---|---|---|
+| `--target` | yes | Single target Molden or HDF5 file. |
+| `--atoms` | yes | Selected atom indices (1-based), with commas/ranges (e.g. `1,3-8`). |
+| `--top_n` | no | Number of top orbitals to print (default: `20`). |
+| `--planarity_threshold` | no | Warning threshold for max atom-to-plane distance (same units as input coordinates; default: `0.10`). |
+
+### Detailed workflow
+
+#### Step 1 – Best-fit plane
+
+The coordinates of the selected atoms are extracted and a best-fit plane is
+found by singular-value decomposition (SVD) of the centred coordinate matrix.
+The last right-singular vector is the unit normal **n̂** of the plane.
+
+The script then computes the distance of each selected atom from the plane and
+reports the maximum and RMS values.  If the maximum distance exceeds
+`--planarity_threshold` a `WARNING` is printed: either the selected atoms are
+genuinely non-planar, or the wrong atoms were chosen.
+
+#### Step 2 – Building the perpendicular p projectors
+
+For every selected atom that has at least one contracted p-type shell in the
+basis, one projector vector is built for each such shell:
+
+```
+p_⊥ = n_x · px + n_y · py + n_z · pz
+```
+
+where `px`, `py`, `pz` are the three Cartesian AO basis functions of that
+contracted p-shell, and `(n_x, n_y, n_z)` are the components of the plane
+normal.
+
+This linear combination picks out the component of the p-orbital that points
+**perpendicularly** to the molecular plane, which is the defining character of
+a π orbital.
+
+**Why one projector per contracted shell, not one per atom?**
+Atoms in a polarised or augmented basis set may carry more than one contracted
+p-type shell (e.g. a valence shell and a diffuse or polarisation shell).  Each
+contributes independently to the π space, so each is given its own projector.
+The contributions are later *summed* in the π score (Step 4).
+
+**Why not just average the p shells?**
+Averaging would conflate shells of very different spatial extent.  Treating
+them separately lets the score reflect the combined π weight across all radial
+functions on each atom, and preserves the meaning of the individual shell
+overlaps.
+
+#### Step 3 – Projector normalisation using the AO overlap matrix
+
+Each projector is normalised in the proper AO inner-product metric before use:
+
+```
+p̂_⊥ = p_⊥ / sqrt( p_⊥ᵀ · S_AO · p_⊥ )
+```
+
+**Why is the AO overlap matrix S_AO needed here?**
+Contracted Gaussian basis functions are *not* orthonormal.  Even within one
+atom, the overlap `⟨px_i | px_j⟩` between two different contracted p-shells
+is generally non-zero, and the overlaps between basis functions on different
+atoms are also non-negligible.  The true inner product in the space spanned by
+the AO basis is given by the AO overlap matrix S_AO, so all norm and overlap
+computations must go through S_AO.
+
+For Molden input the AO overlap matrix is computed analytically by orbkit.
+For HDF5 input it is read directly from the `AO_OVERLAP_MATRIX` dataset stored
+by OpenMolcas, which is faster and avoids calling orbkit.
+
+#### Step 4 – Computing π character of each MO and ranking
+
+Given the full MO coefficient matrix **C** (rows = MOs, columns = AOs) and the
+set of normalised projectors {p̂_⊥,i}, the overlap of MO *k* with projector *i*
+is:
+
+```
+⟨MO_k | p̂_⊥,i⟩ = C_k · S_AO · p̂_⊥,i
+```
+
+The **π score** of MO *k* is the sum of absolute overlaps over all projectors:
+
+```
+score(k) = Σ_i |⟨MO_k | p̂_⊥,i⟩|
+```
+
+MOs are then sorted in descending order of score and the top `--top_n` are
+printed.
+
+**Why use all AO basis functions and not only the p-type block?**
+An MO is a linear combination of *all* basis functions:
+
+```
+|MO_k⟩ = Σ_μ C_{k,μ} |χ_μ⟩
+```
+
+The correct overlap with any projector therefore requires the *full* row of
+MO coefficients and the *full* AO overlap matrix:
+
+```
+⟨MO_k | p̂_⊥⟩ = Σ_{μ,ν} C_{k,μ} S_{μν} (p̂_⊥)_ν
+```
+
+While `(p̂_⊥)_ν` is non-zero only at the three AO positions belonging to the
+target p-shell, S_{μν} couples those positions to *every* other AO.  The
+contribution from s, d, or other AO types on all atoms therefore enters through
+the off-diagonal elements of S_AO, and ignoring them (i.e. using only the
+p-coefficient block of C) would give incorrect overlaps.
+
+Conversely, the projector itself is confined to the p-type AOs: the projector
+vector has zeros everywhere except at the three components of the chosen
+p-shell.  This means that the sum over ν effectively runs only over those three
+positions, but the sum over μ still runs over all basis functions.
+
+---
+
 ## HDF5 mode – how it works
 
 OpenMolcas writes an HDF5 checkpoint file (`.h5`) that contains, among other things:
