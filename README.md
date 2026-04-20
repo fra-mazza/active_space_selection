@@ -129,6 +129,42 @@ The output `rotate.csv`, `rotated.h5`, and `ALTER.txt` are written to `test/phen
 
 ---
 
+## Pi-orbital ranking for planar systems
+
+The repository now also provides `get_pi_orbitals.py`, a lightweight helper to
+identify MOs with the largest \(\pi\)-character for a selected planar fragment
+(e.g. aromatic ring atoms).
+
+### Usage
+
+```bash
+python get_pi_orbitals.py \
+    --target <target.molden|target.h5> \
+    --atoms <atom_list> \
+    [--top_n 20] \
+    [--planarity_threshold 0.10]
+```
+
+### What it does
+
+1. Fits the best plane through the selected atoms (`--atoms`, 1-based).
+2. Checks planarity and prints a warning if atoms are too far from that plane.
+3. Builds perpendicular p projectors on selected atoms.
+4. Computes \(|\langle \mathrm{MO} | p_\perp \rangle|\), sums over all projectors,
+   and ranks orbitals by the resulting score.
+5. Prints the top `--top_n` orbitals (default: 20).
+
+### Arguments
+
+| Argument | Required | Description |
+|---|---|---|
+| `--target` | yes | Single target Molden or HDF5 file. |
+| `--atoms` | yes | Selected atom indices (1-based), with commas/ranges (e.g. `1,3-8`). |
+| `--top_n` | no | Number of top orbitals to print (default: `20`). |
+| `--planarity_threshold` | no | Warning threshold for max atom-to-plane distance (same units as input coordinates; default: `0.10`). |
+
+---
+
 ## HDF5 mode – how it works
 
 OpenMolcas writes an HDF5 checkpoint file (`.h5`) that contains, among other things:
