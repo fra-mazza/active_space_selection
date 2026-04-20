@@ -134,7 +134,7 @@ class TestH5FileDetection:
 class TestMoldenRepresentationDetection:
     """Unit tests for spherical/cartesian tag detection in Molden files."""
 
-    def test_missing_5d_7f_means_cartesian_df(self, tmp_path):
+    def test_missing_spherical_tags_means_cartesian_df(self, tmp_path):
         from active_space_selection import parse_molden_angular_representation
         p = tmp_path / "cart_df.molden"
         p.write_text(
@@ -147,7 +147,7 @@ class TestMoldenRepresentationDetection:
         assert rep[2] == "cartesian"
         assert rep[3] == "cartesian"
 
-    def test_5d7f_tag_means_spherical_df(self, tmp_path):
+    def test_presence_of_5d7f_tag_means_spherical_df(self, tmp_path):
         from active_space_selection import parse_molden_angular_representation
         p = tmp_path / "sph_df.molden"
         p.write_text(
@@ -210,21 +210,21 @@ class TestRotationBlocks:
 
 
 class TestCartesianToSphericalTransform:
-    """Unit tests for Schlegel-Frisch Cartesian/spherical transformations."""
+    """Unit tests for Schlegel–Frisch Cartesian/spherical transformations."""
 
     def test_transform_orthonormality_d_shell(self):
         from active_space_selection import get_cartesian_spherical_transforms
         C, C_inv = get_cartesian_spherical_transforms(2)
         I = C @ C_inv
         np.testing.assert_allclose(I, np.eye(5), atol=1e-12,
-                                   err_msg="d-shell Cartesian/spherical transform is not orthonormal")
+                                   err_msg="d-shell Cartesian/spherical transform/inverse mismatch")
 
     def test_transform_orthonormality_f_shell(self):
         from active_space_selection import get_cartesian_spherical_transforms
         C, C_inv = get_cartesian_spherical_transforms(3)
         I = C @ C_inv
         np.testing.assert_allclose(I, np.eye(7), atol=1e-12,
-                                   err_msg="f-shell Cartesian/spherical transform is not orthonormal")
+                                   err_msg="f-shell Cartesian/spherical transform/inverse mismatch")
 
 
 class TestMORotation:

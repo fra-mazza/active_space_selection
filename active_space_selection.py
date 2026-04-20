@@ -62,6 +62,16 @@ def compute_rmsd(P_rotated, Q):
 # ======================== Molden File Processing ==============================
 
 _ANGULAR_LABEL_TO_L = {'s': 0, 'p': 1, 'd': 2, 'f': 3, 'g': 4, 'h': 5}
+_REAL_IF_CLOSE_TOL = 100  # units in the last place (ulp) multiplier for stable roundtrips
+_REAL_ROW_IMAG_TOL = 1e-10
+
+
+def _as_real_array(values):
+    """Project tiny numerical-imaginary residues to float arrays."""
+    out = np.real_if_close(values, tol=_REAL_IF_CLOSE_TOL)
+    if np.iscomplexobj(out):
+        out = out.real
+    return np.asarray(out, dtype=float)
 
 
 def num_spherical_functions(l):
@@ -155,10 +165,12 @@ def _schlegel_frisch_complex_coeff(l, m, lx, ly, lz):
             if choose_idx < 0 or choose_idx > abs_m:
                 continue
 
-            # Eq. 15 phase term: (-1)^{∓(...)/2}
-            exponent = (abs_m - lx + 2 * k) / 2.0
-            sign = -1.0 if m >= 0 else 1.0
-            phase = np.exp(1j * np.pi * sign * exponent)
+            # Eq. 15 phase term: upper sign branch for m>=0, lower sign branch for m<0.
+            exponent_num = abs_m - lx + 2 * k
+            sign = -1 if m >= 0 else 1
+            power_mod_4 = (sign * exponent_num) % 4
+            phase_cycle = (1.0, 1.0j, -1.0, -1.0j)
+            phase = phase_cycle[power_mod_4]
             inner += comb(j, k) * comb(abs_m, choose_idx) * phase
 
         total += term_i * inner
@@ -203,7 +215,7 @@ def get_cartesian_spherical_transforms(l):
                 C_complex[m + l, :] + C_complex[-m + l, :]
             ) / np.sqrt(2.0)
 
-        if np.max(np.abs(np.imag(row))) > 1e-10:
+        if np.max(np.abs(np.imag(row))) > _REAL_ROW_IMAG_TOL:
             raise ValueError(
                 f"Internal error while building l={l} Cartesian/spherical transform: non-real row detected."
             )
@@ -228,8 +240,9 @@ def parse_molden_angular_representation(filename):
     upper = text.upper()
     flags = re.MULTILINE
 
-    d_spherical = bool(re.search(r'^\[(5D|5D7F|5D10F)\]', upper, flags=flags))
-    f_spherical = bool(re.search(r'^\[(7F|5D7F)\]', upper, flags=flags))
+    has_5d7f = bool(re.search(r'^\[5D7F\]', upper, flags=flags))
+    d_spherical = has_5d7f or bool(re.search(r'^\[(5D|5D10F)\]', upper, flags=flags))
+    f_spherical = has_5d7f or bool(re.search(r'^\[7F\]', upper, flags=flags))
     g_spherical = bool(re.search(r'^\[9G\]', upper, flags=flags))
     h_spherical = bool(re.search(r'^\[11H\]', upper, flags=flags))
 
@@ -614,7 +627,7 @@ def rotate_mo_coefficients_from_molden(mo_coeffs, shells, rotation_matrix):
             sph_rot = D @ sph_block
             rotated_block = C_sph_to_cart @ sph_rot
 
-        new_coeffs.extend(np.real_if_close(rotated_block, tol=1000).astype(float).tolist())
+        new_coeffs.extend(_as_real_array(rotated_block).tolist())
         idx += n_funcs
     return new_coeffs
 
@@ -899,7 +912,7 @@ def rotate_mo_coefficients_h5(C_raw, rotation_blocks, rotation_matrix):
             block_sph = shell_block @ C_cart_to_sph.T        # (n_mo, 2l+1)
             rotated_sph = block_sph @ D.T                    # (n_mo, 2l+1)
             rotated_cart = rotated_sph @ C_sph_to_cart.T     # (n_mo, n_cart)
-            C_rot[:, ao_indices] = np.real_if_close(rotated_cart, tol=1000).astype(float)
+            C_rot[:, ao_indices] = _as_real_array(rotated_cart)
 
     return C_rot
 
