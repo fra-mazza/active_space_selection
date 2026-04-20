@@ -131,6 +131,37 @@ class TestH5FileDetection:
         assert not is_h5_file("file.txt")
 
 
+class TestMoldenRepresentationDetection:
+    """Unit tests for spherical/cartesian tag detection in Molden files."""
+
+    def test_missing_5d_7f_means_cartesian_df(self, tmp_path):
+        from active_space_selection import parse_molden_angular_representation
+        p = tmp_path / "cart_df.molden"
+        p.write_text(
+            "[Molden Format]\n"
+            "[Atoms] (AU)\nH 1 1 0.0 0.0 0.0\n"
+            "[GTO]\n1\n d 1 1.00\n 1.0 1.0\n f 1 1.00\n 1.0 1.0\n"
+            "[MO]\n"
+        )
+        rep = parse_molden_angular_representation(str(p))
+        assert rep[2] == "cartesian"
+        assert rep[3] == "cartesian"
+
+    def test_5d7f_tag_means_spherical_df(self, tmp_path):
+        from active_space_selection import parse_molden_angular_representation
+        p = tmp_path / "sph_df.molden"
+        p.write_text(
+            "[Molden Format]\n"
+            "[5D7F]\n"
+            "[Atoms] (AU)\nH 1 1 0.0 0.0 0.0\n"
+            "[GTO]\n1\n d 1 1.00\n 1.0 1.0\n f 1 1.00\n 1.0 1.0\n"
+            "[MO]\n"
+        )
+        rep = parse_molden_angular_representation(str(p))
+        assert rep[2] == "spherical"
+        assert rep[3] == "spherical"
+
+
 class TestCoordExtraction:
     """Unit tests for coordinate extraction from HDF5 files."""
 
@@ -158,19 +189,42 @@ class TestRotationBlocks:
         with h5py.File(REF_H5, 'r') as f:
             n_basis = len(f['BASIS_FUNCTION_IDS'])
         covered = set()
-        for ao_indices, m_values, l in blocks:
-            assert len(ao_indices) == 2 * l + 1
-            assert len(m_values) == 2 * l + 1
+        for ao_indices, m_values, l, representation in blocks:
+            expected = 2 * l + 1 if representation == "spherical" else (l + 1) * (l + 2) // 2
+            assert len(ao_indices) == expected
+            if representation == "spherical":
+                assert len(m_values) == 2 * l + 1
+            else:
+                assert len(m_values) == 0
             covered.update(ao_indices)
         assert covered == set(range(n_basis)), "Rotation blocks do not cover all AOs"
 
     def test_m_values_complete(self):
         from active_space_selection import get_rotation_blocks_from_h5
         blocks = get_rotation_blocks_from_h5(REF_H5)
-        for ao_indices, m_values, l in blocks:
-            assert sorted(m_values) == list(range(-l, l + 1)), (
-                f"m values for l={l} are not complete: {m_values}"
-            )
+        for ao_indices, m_values, l, representation in blocks:
+            if representation == "spherical":
+                assert sorted(m_values) == list(range(-l, l + 1)), (
+                    f"m values for l={l} are not complete: {m_values}"
+                )
+
+
+class TestCartesianToSphericalTransform:
+    """Unit tests for Schlegel-Frisch Cartesian/spherical transformations."""
+
+    def test_transform_orthonormality_d_shell(self):
+        from active_space_selection import get_cartesian_spherical_transforms
+        C, C_inv = get_cartesian_spherical_transforms(2)
+        I = C @ C_inv
+        np.testing.assert_allclose(I, np.eye(5), atol=1e-12,
+                                   err_msg="d-shell Cartesian/spherical transform is not orthonormal")
+
+    def test_transform_orthonormality_f_shell(self):
+        from active_space_selection import get_cartesian_spherical_transforms
+        C, C_inv = get_cartesian_spherical_transforms(3)
+        I = C @ C_inv
+        np.testing.assert_allclose(I, np.eye(7), atol=1e-12,
+                                   err_msg="f-shell Cartesian/spherical transform is not orthonormal")
 
 
 class TestMORotation:

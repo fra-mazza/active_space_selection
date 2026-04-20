@@ -14,6 +14,7 @@ import os
 import numpy as np
 import argparse
 import re
+import math
 from scipy.spatial.transform import Rotation as R
 from sphecerix import tesseral_wigner_D
 
@@ -60,6 +61,187 @@ def compute_rmsd(P_rotated, Q):
 
 # ======================== Molden File Processing ==============================
 
+_ANGULAR_LABEL_TO_L = {'s': 0, 'p': 1, 'd': 2, 'f': 3, 'g': 4, 'h': 5}
+
+
+def num_spherical_functions(l):
+    """Return the number of pure spherical-harmonic functions for angular momentum l."""
+    return 2 * l + 1
+
+
+def num_cartesian_functions(l):
+    """Return the number of Cartesian functions for angular momentum l."""
+    return (l + 1) * (l + 2) // 2
+
+
+def get_cartesian_exponents_molden_order(l):
+    """
+    Return Cartesian exponent tuples (lx, ly, lz) in Molden/OpenMolcas AO order.
+
+    Implemented for d and f shells, which are the practical cases where
+    Cartesian-vs-spherical ambiguity commonly appears.
+    """
+    if l == 2:  # xx, yy, zz, xy, xz, yz
+        return [(2, 0, 0), (0, 2, 0), (0, 0, 2), (1, 1, 0), (1, 0, 1), (0, 1, 1)]
+    if l == 3:  # xxx, yyy, zzz, xyy, xxy, xxz, xzz, yzz, yyz, xyz
+        return [
+            (3, 0, 0), (0, 3, 0), (0, 0, 3), (1, 2, 0), (2, 1, 0),
+            (2, 0, 1), (1, 0, 2), (0, 1, 2), (0, 2, 1), (1, 1, 1),
+        ]
+    raise NotImplementedError(
+        f"Cartesian-to-spherical conversion is currently implemented for l=2/3 only, got l={l}."
+    )
+
+
+def _cartesian_overlap_same_l(exp1, exp2):
+    """
+    Overlap S between normalized Cartesian Gaussians of equal total l (Eq. 19).
+    """
+    lx1, ly1, lz1 = exp1
+    lx2, ly2, lz2 = exp2
+    sums = (lx1 + lx2, ly1 + ly2, lz1 + lz2)
+    if any(s % 2 != 0 for s in sums):
+        return 0.0
+
+    fac = math.factorial
+    first = (
+        fac(sums[0]) * fac(sums[1]) * fac(sums[2]) /
+        (fac(sums[0] // 2) * fac(sums[1] // 2) * fac(sums[2] // 2))
+    )
+    second = (
+        fac(2 * lx1) * fac(2 * ly1) * fac(2 * lz1) *
+        fac(2 * lx2) * fac(2 * ly2) * fac(2 * lz2) /
+        (fac(lx1) * fac(ly1) * fac(lz1) * fac(lx2) * fac(ly2) * fac(lz2))
+    ) ** (-0.5)
+    return first * second
+
+
+def _schlegel_frisch_complex_coeff(l, m, lx, ly, lz):
+    """
+    Complex spherical (Y_l^m) -> normalized Cartesian coefficient c(l,m,lx,ly,lz)
+    from Schlegel & Frisch (Eq. 15).
+    """
+    if lx + ly + lz != l:
+        return 0.0j
+
+    abs_m = abs(m)
+    j_num = lx + ly - abs_m
+    if j_num < 0 or (j_num % 2) != 0:
+        return 0.0j
+    j = j_num // 2
+
+    fac = math.factorial
+    comb = math.comb
+    prefactor = math.sqrt(
+        fac(2 * lx) * fac(2 * ly) * fac(2 * lz) * fac(l) * fac(l - abs_m) /
+        (fac(2 * l) * fac(lx) * fac(ly) * fac(lz) * fac(l + abs_m))
+    ) / (2 ** l * fac(l))
+
+    total = 0.0j
+    for i in range((l - abs_m) // 2 + 1):
+        if j > i:
+            continue
+        term_i = (
+            comb(l, i) *
+            comb(i, j) *
+            ((-1) ** i) *
+            fac(2 * l - 2 * i) /
+            fac(l - abs_m - 2 * i)
+        )
+
+        inner = 0.0j
+        for k in range(j + 1):
+            choose_idx = lx - 2 * k
+            if choose_idx < 0 or choose_idx > abs_m:
+                continue
+
+            # Eq. 15 phase term: (-1)^{∓(...)/2}
+            exponent = (abs_m - lx + 2 * k) / 2.0
+            sign = -1.0 if m >= 0 else 1.0
+            phase = np.exp(1j * np.pi * sign * exponent)
+            inner += comb(j, k) * comb(abs_m, choose_idx) * phase
+
+        total += term_i * inner
+
+    return prefactor * total
+
+
+def get_cartesian_spherical_transforms(l):
+    """
+    Build Cartesian↔real-spherical transforms for one shell angular momentum l.
+
+    Returns
+    -------
+    C_cart_to_sph : ndarray, shape (2l+1, n_cart)
+        Maps Cartesian coefficients to real tesseral spherical coefficients in
+        sphecerix order m = -l..+l.
+    C_sph_to_cart : ndarray, shape (n_cart, 2l+1)
+        Inverse map from Eq. 18 using the Cartesian overlap metric.
+    """
+    cart_exponents = get_cartesian_exponents_molden_order(l)
+    n_sph = num_spherical_functions(l)
+    n_cart = len(cart_exponents)
+
+    # Complex spherical rows m=-l..+l
+    C_complex = np.zeros((n_sph, n_cart), dtype=np.complex128)
+    for i_m, m in enumerate(range(-l, l + 1)):
+        for j, (lx, ly, lz) in enumerate(cart_exponents):
+            C_complex[i_m, j] = _schlegel_frisch_complex_coeff(l, m, lx, ly, lz)
+
+    # Complex -> real spherical harmonics (paper combinations)
+    C_real = np.zeros((n_sph, n_cart), dtype=np.float64)
+    for i_m, m in enumerate(range(-l, l + 1)):
+        if m < 0:
+            p = -m
+            row = (
+                C_complex[p + l, :] - C_complex[-p + l, :]
+            ) / (1j * np.sqrt(2.0))
+        elif m == 0:
+            row = C_complex[l, :]
+        else:
+            row = (
+                C_complex[m + l, :] + C_complex[-m + l, :]
+            ) / np.sqrt(2.0)
+
+        if np.max(np.abs(np.imag(row))) > 1e-10:
+            raise ValueError(
+                f"Internal error while building l={l} Cartesian/spherical transform: non-real row detected."
+            )
+        C_real[i_m, :] = np.real(row)
+
+    # Cartesian overlap metric S (Eq. 19), then Eq. 18 inverse
+    S_cart = np.zeros((n_cart, n_cart), dtype=np.float64)
+    for i, exp_i in enumerate(cart_exponents):
+        for j, exp_j in enumerate(cart_exponents):
+            S_cart[i, j] = _cartesian_overlap_same_l(exp_i, exp_j)
+
+    C_sph_to_cart = S_cart @ C_real.T
+    return C_real, C_sph_to_cart
+
+
+def parse_molden_angular_representation(filename):
+    """
+    Detect whether d/f/g/h shells are spherical or Cartesian from Molden tags.
+    """
+    with open(filename, 'r') as f:
+        text = f.read()
+    upper = text.upper()
+    flags = re.MULTILINE
+
+    d_spherical = bool(re.search(r'^\[(5D|5D7F|5D10F)\]', upper, flags=flags))
+    f_spherical = bool(re.search(r'^\[(7F|5D7F)\]', upper, flags=flags))
+    g_spherical = bool(re.search(r'^\[9G\]', upper, flags=flags))
+    h_spherical = bool(re.search(r'^\[11H\]', upper, flags=flags))
+
+    return {
+        0: 'spherical',
+        1: 'spherical',
+        2: 'spherical' if d_spherical else 'cartesian',
+        3: 'spherical' if f_spherical else 'cartesian',
+        4: 'spherical' if g_spherical else 'cartesian',
+        5: 'spherical' if h_spherical else 'cartesian',
+    }
+
 def parse_molden_sections(filename):
     """
     Reads a Molden file and splits it into sections.
@@ -87,14 +269,16 @@ def parse_molden_sections(filename):
             parsed.append((header, sec))
     return parsed
 
-def process_atom_block(lines):
+def process_atom_block(lines, angular_representation):
     """
     Processes lines for one atom block in the [GTO] section.
     
     Data Structure:
-      Returns a list of tuples. Each tuple has the form (orbital_label, n_funcs) where:
-         - orbital_label (str): e.g., 's', 'p', 'd', etc.
-         - n_funcs (int): expected number of functions (e.g., 1 for s, 3 for p, 5 for d, etc.)
+      Returns a list of tuples. Each tuple has the form
+      (orbital_label, n_funcs, representation) where:
+          - orbital_label (str): e.g., 's', 'p', 'd', etc.
+          - n_funcs (int): number of functions in that shell
+          - representation (str): 'spherical' or 'cartesian'
     
     Parameters:
       lines (list of str): Lines belonging to an atom block.
@@ -107,30 +291,24 @@ def process_atom_block(lines):
         parts = line.split()
         if parts and parts[0].lower() in ['s', 'p', 'd', 'f', 'g', 'h']:
             orb = parts[0].lower()
-            if orb == 's':
-                n_funcs = 1
-            elif orb == 'p':
-                n_funcs = 3
-            elif orb == 'd':
-                n_funcs = 5
-            elif orb == 'f':
-                n_funcs = 7
-            elif orb == 'g':
-                n_funcs = 9
-            elif orb == 'h':
-                n_funcs = 11
+            l = _ANGULAR_LABEL_TO_L[orb]
+            representation = angular_representation.get(l, 'spherical')
+            if l <= 1:
+                representation = 'spherical'
+            if representation == 'spherical':
+                n_funcs = num_spherical_functions(l)
             else:
-                n_funcs = 1
-            shells.append((orb, n_funcs))
+                n_funcs = num_cartesian_functions(l)
+            shells.append((orb, n_funcs, representation))
     return shells
 
-def parse_gto_basis(filename):
+def parse_gto_basis(filename, angular_representation=None):
     """
     Parses the [GTO] section of the Molden file to extract the basis set information.
     
     Data Structure:
-      Returns a list of tuples, e.g.:
-         [('s', 1), ('p', 3), ('d', 5), ...]
+       Returns a list of tuples, e.g.:
+          [('s', 1, 'spherical'), ('p', 3, 'spherical'), ('d', 6, 'cartesian'), ...]
       The order corresponds to the ordering of shells in the file.
     
     Parameters:
@@ -139,6 +317,9 @@ def parse_gto_basis(filename):
     Returns:
       list of tuple (str, int)
     """
+    if angular_representation is None:
+        angular_representation = parse_molden_angular_representation(filename)
+
     with open(filename, 'r') as f:
         content = f.read()
     match = re.search(r'(?si)\[GTO\].*?(?=\n\[)', content)
@@ -155,12 +336,12 @@ def parse_gto_basis(filename):
         # A line with only a number indicates the start of a new atom block
         if re.match(r'^\d+$', line):
             if current_atom_lines:
-                shells.extend(process_atom_block(current_atom_lines))
+                shells.extend(process_atom_block(current_atom_lines, angular_representation))
             current_atom_lines = []
         else:
             current_atom_lines.append(line)
     if current_atom_lines:
-        shells.extend(process_atom_block(current_atom_lines))
+        shells.extend(process_atom_block(current_atom_lines, angular_representation))
     return shells
 
 def parse_mo_block(mo_text):
@@ -361,6 +542,9 @@ def get_permutation(l):
     elif l == 4:
         molden_m = [0, 1, -1, 2, -2, 3, -3, 4, -4]
         sphecerix_m = [-4, -3, -2, -1, 0, 1, 2, 3, 4]
+    elif l == 5:
+        molden_m = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5]
+        sphecerix_m = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
     else:
         return [], []
     permutation = [molden_m.index(m) for m in sphecerix_m]
@@ -392,26 +576,22 @@ def rotate_mo_coefficients_from_molden(mo_coeffs, shells, rotation_matrix):
     """
     new_coeffs = []
     idx = 0
-    for orb, n_funcs in shells:
-        # Determine angular momentum l based on orbital label
-        if orb == 's':
-            l = 0
-        elif orb == 'p':
-            l = 1
-        elif orb == 'd':
-            l = 2
-        elif orb == 'f':
-            l = 3
-        elif orb == 'g':
-            l = 4
-        elif orb == 'h':
-            l = 5
+    Robj = R.from_matrix(rotation_matrix)
+    for shell in shells:
+        if len(shell) == 2:
+            orb, n_funcs = shell
+            representation = 'spherical'
         else:
-            l = 0
-        
-        # Check that n_funcs matches 2*l+1
-        if n_funcs != 2 * l + 1:
-            raise ValueError(f"For orbital '{orb}', expected {2*l+1} functions but got {n_funcs}.")
+            orb, n_funcs, representation = shell
+
+        # Determine angular momentum l based on orbital label
+        l = _ANGULAR_LABEL_TO_L.get(orb, 0)
+
+        expected = num_spherical_functions(l) if representation == 'spherical' else num_cartesian_functions(l)
+        if n_funcs != expected:
+            raise ValueError(
+                f"For orbital '{orb}' ({representation}), expected {expected} functions but got {n_funcs}."
+            )
         
         # Extract coefficients for this shell
         block = mo_coeffs[idx: idx + n_funcs]
@@ -419,28 +599,50 @@ def rotate_mo_coefficients_from_molden(mo_coeffs, shells, rotation_matrix):
             raise ValueError(f"Expected {n_funcs} coefficients for orbital '{orb}', got {len(block)}.")
         block = np.array(block, dtype=float)
 
-        Robj = R.from_matrix(rotation_matrix)
-        D =  tesseral_wigner_D(l, Robj)
+        D = tesseral_wigner_D(l, Robj)
 
-        # Permuta, ruota 
-        perm, inv_perm = get_permutation(l)
-       # print(l, block, perm)
-        permuted = block[perm]
-       # print(permuted)
-        rotated_block = D @ permuted
-        # riordina nell'ordine iniziale
-        rotated_block = rotated_block[inv_perm]
+        if representation == 'spherical':
+            # Molden spherical order -> sphecerix order -> rotate -> back
+            perm, inv_perm = get_permutation(l)
+            permuted = block[perm]
+            rotated_block = D @ permuted
+            rotated_block = rotated_block[inv_perm]
+        else:
+            # Cartesian -> spherical (Schlegel-Frisch) -> rotate -> Cartesian
+            C_cart_to_sph, C_sph_to_cart = get_cartesian_spherical_transforms(l)
+            sph_block = C_cart_to_sph @ block
+            sph_rot = D @ sph_block
+            rotated_block = C_sph_to_cart @ sph_rot
 
-        new_coeffs.extend(rotated_block.tolist())
+        new_coeffs.extend(np.real_if_close(rotated_block, tol=1000).astype(float).tolist())
         idx += n_funcs
     return new_coeffs
 
 def create_rotated_molden(input_molden, output_molden, R_mat, tar_coords):
 
+    angular_representation = parse_molden_angular_representation(input_molden)
+
     # Parse the [GTO] section to extract basis shell information
-    shells = parse_gto_basis(input_molden)
-    total_basis = sum(n for orb, n in shells)
+    shells = parse_gto_basis(input_molden, angular_representation=angular_representation)
+    total_basis = sum(n for _, n, _ in shells)
     print("Total number of basis functions (from [GTO] shells):", total_basis)
+
+    has_d = any(orb == 'd' for orb, _, _ in shells)
+    has_f = any(orb == 'f' for orb, _, _ in shells)
+    converting_d = has_d and angular_representation[2] == 'cartesian'
+    converting_f = has_f and angular_representation[3] == 'cartesian'
+    if converting_d or converting_f:
+        shell_text = []
+        if converting_d:
+            shell_text.append('d')
+        if converting_f:
+            shell_text.append('f')
+        print(
+            "WARNING: Detected Cartesian "
+            + "/".join(shell_text)
+            + " shells (missing [5D]/[7F]/[5D7F] spherical tags). "
+            + "Converting Cartesian coefficients to spherical harmonics for rotation/overlap, then back to Cartesian for output."
+        )
     
     # Parse the [MO] section from the input file
     sections = parse_molden_sections(input_molden)
@@ -603,10 +805,12 @@ def get_rotation_blocks_from_h5(filename):
 
     Returns
     -------
-    list of (ao_indices, m_values, l)
+    list of (ao_indices, m_values, l, representation)
         ``ao_indices`` : list of int  – indices of these AOs in the h5 ordering
         ``m_values``   : list of int  – magnetic quantum numbers in the h5 order
+                                       (spherical shells only; empty for Cartesian)
         ``l``          : int          – angular momentum of the shell
+        ``representation`` : 'spherical' or 'cartesian'
     """
     if not _H5PY_AVAILABLE:
         raise ImportError("h5py is required to read HDF5 files: pip install h5py")
@@ -626,7 +830,19 @@ def get_rotation_blocks_from_h5(filename):
         items = sorted(groups[key], key=lambda x: x[0])
         ao_indices = [x[0] for x in items]
         m_values = [x[1] for x in items]
-        blocks.append((ao_indices, m_values, int(key[1])))
+        l = int(key[1])
+        n_comp = len(ao_indices)
+        if n_comp == num_spherical_functions(l):
+            representation = 'spherical'
+        elif n_comp == num_cartesian_functions(l):
+            representation = 'cartesian'
+        else:
+            raise ValueError(
+                f"Unsupported shell size in BASIS_FUNCTION_IDS for l={l}: got {n_comp} components."
+            )
+        if representation == 'cartesian':
+            m_values = []
+        blocks.append((ao_indices, m_values, l, representation))
 
     return blocks
 
@@ -641,7 +857,7 @@ def rotate_mo_coefficients_h5(C_raw, rotation_blocks, rotation_matrix):
     ----------
     C_raw : ndarray, shape (n_mo, n_basis)
         MO coefficients as read from ``MO_VECTORS`` after reshaping.
-    rotation_blocks : list of (ao_indices, m_values, l)
+    rotation_blocks : list of (ao_indices, m_values, l, representation)
         Output of :func:`get_rotation_blocks_from_h5`.
     rotation_matrix : ndarray, shape (3, 3)
         Active rotation matrix (R_ref→target).
@@ -654,21 +870,36 @@ def rotate_mo_coefficients_h5(C_raw, rotation_blocks, rotation_matrix):
     C_rot = C_raw.copy()
     Robj = R.from_matrix(rotation_matrix)
 
-    for ao_indices, m_values, l in rotation_blocks:
+    for block in rotation_blocks:
+        if len(block) == 3:
+            ao_indices, m_values, l = block
+            representation = 'spherical'
+        else:
+            ao_indices, m_values, l, representation = block
+
         D = tesseral_wigner_D(l, Robj)
 
-        # Build permutation: h5 m-order → sphecerix order (−l … +l)
-        sphecerix_m = list(range(-l, l + 1))
-        perm = [m_values.index(m) for m in sphecerix_m]
-        inv_perm = [0] * len(perm)
-        for i, p in enumerate(perm):
-            inv_perm[p] = i
+        if representation == 'spherical':
+            # Build permutation: h5 m-order → sphecerix order (−l … +l)
+            sphecerix_m = list(range(-l, l + 1))
+            perm = [m_values.index(m) for m in sphecerix_m]
+            inv_perm = [0] * len(perm)
+            for i, p in enumerate(perm):
+                inv_perm[p] = i
 
-        # Extract block, shape (n_mo, 2l+1)
-        block = C_raw[:, ao_indices]
-        block_sph = block[:, perm]          # permute to sphecerix m-order
-        rotated_sph = block_sph @ D.T       # apply Wigner D to all MOs at once
-        C_rot[:, ao_indices] = rotated_sph[:, inv_perm]  # restore h5 m-order
+            # Extract block, shape (n_mo, 2l+1)
+            shell_block = C_raw[:, ao_indices]
+            block_sph = shell_block[:, perm]     # permute to sphecerix m-order
+            rotated_sph = block_sph @ D.T        # apply Wigner D to all MOs at once
+            C_rot[:, ao_indices] = rotated_sph[:, inv_perm]  # restore h5 m-order
+        else:
+            # Cartesian -> spherical -> rotate -> Cartesian
+            C_cart_to_sph, C_sph_to_cart = get_cartesian_spherical_transforms(l)
+            shell_block = C_raw[:, ao_indices]               # (n_mo, n_cart)
+            block_sph = shell_block @ C_cart_to_sph.T        # (n_mo, 2l+1)
+            rotated_sph = block_sph @ D.T                    # (n_mo, 2l+1)
+            rotated_cart = rotated_sph @ C_sph_to_cart.T     # (n_mo, n_cart)
+            C_rot[:, ao_indices] = np.real_if_close(rotated_cart, tol=1000).astype(float)
 
     return C_rot
 
@@ -1080,6 +1311,22 @@ def main():
         # Step 2 (HDF5): rotate MO coefficients in memory using the pre-computed
         #                 AO basis information from the reference HDF5 file.
         rotation_blocks = get_rotation_blocks_from_h5(best_ref)
+        has_d = any(l == 2 for _, _, l, _ in rotation_blocks)
+        has_f = any(l == 3 for _, _, l, _ in rotation_blocks)
+        converting_d = any((l == 2 and rep == 'cartesian') for _, _, l, rep in rotation_blocks)
+        converting_f = any((l == 3 and rep == 'cartesian') for _, _, l, rep in rotation_blocks)
+        if (has_d and converting_d) or (has_f and converting_f):
+            shell_text = []
+            if has_d and converting_d:
+                shell_text.append('d')
+            if has_f and converting_f:
+                shell_text.append('f')
+            print(
+                "WARNING: Detected Cartesian "
+                + "/".join(shell_text)
+                + " shells in HDF5 basis metadata. "
+                + "Converting Cartesian coefficients to spherical harmonics for rotation/overlap, then back to Cartesian for output."
+            )
         with h5py.File(best_ref, 'r') as f:
             n = int(np.sqrt(len(f['MO_VECTORS'])))
             C_raw = np.array(f['MO_VECTORS']).reshape(n, n)

@@ -150,6 +150,67 @@ The Molden and HDF5 pathways produce numerically identical orbital mappings and 
 
 ---
 
+## Cartesian d/f shells: automatic detection and conversion
+
+Some basis sets (for example `6-311G*`) may use **Cartesian** \(d/f\) functions instead of pure spherical ones.
+The script now handles this explicitly in both Molden and HDF5 workflows.
+
+### 1) Detection logic
+
+- **Molden**:
+  - The script checks whether \(d\) and/or \(f\) shells are present in `[GTO]`.
+  - It inspects angular tags:
+    - `[5D]`, `[7F]`, `[5D7F]` (and `[5D10F]` for mixed convention) indicate spherical shells.
+  - If \(d/f\) shells exist but the corresponding spherical tags are missing, those shells are treated as Cartesian.
+- **HDF5**:
+  - The script inspects `BASIS_FUNCTION_IDS` block sizes per `(center, l, shell)`.
+  - For each shell:
+    - `2l+1` functions → spherical
+    - `(l+1)(l+2)/2` functions → Cartesian
+
+When Cartesian \(d/f\) shells are detected, the script prints a runtime warning explaining that Cartesian coefficients are being converted to spherical harmonics for rotation/overlap, then transformed back.
+
+### 2) Schlegel–Frisch transformation (Cartesian ↔ spherical)
+
+To rotate shells consistently with Wigner \(D\)-matrices, the implementation follows:
+
+> H. B. Schlegel & M. J. Frisch, *Int. J. Quantum Chem.* **54**, 83–87 (1995)
+
+For each shell angular momentum \(l\):
+
+1. Build spherical→Cartesian coefficients \(c(l,m,l_x,l_y,l_z)\) using the closed-form expression (Eq. 15).
+2. Build real tesseral combinations from \(m\) / \(-m\) pairs.
+3. Build the Cartesian overlap metric \(S\) (Eq. 19).
+4. Compute inverse coefficients with Eq. 18:
+   \[
+   c^{-1} = S\,c^\*
+   \]
+
+This yields two matrices per shell:
+
+- `C_cart_to_sph`: Cartesian coefficients → real spherical coefficients
+- `C_sph_to_cart`: real spherical coefficients → Cartesian coefficients
+
+### 3) How rotation is applied for Cartesian shells
+
+For every Cartesian \(d/f\) shell block:
+
+1. Convert AO coefficients Cartesian → spherical (`C_cart_to_sph`).
+2. Apply shell rotation with the same tesseral Wigner \(D\)-matrix used for pure spherical shells.
+3. Convert spherical → Cartesian (`C_sph_to_cart`).
+
+So the overlap machinery remains unchanged conceptually:
+
+- overlap is always evaluated in a consistent AO representation,
+- and output files (`rotated.molden`, `rotated.h5`) remain inspectable in the original basis convention.
+
+### 4) Scope
+
+- Cartesian conversion is implemented for **d (l=2)** and **f (l=3)** shells (the practical ambiguity for most common basis sets).
+- The spherical pathway is unchanged.
+
+---
+
 ## Tests
 
 ```bash
