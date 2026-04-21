@@ -106,7 +106,8 @@ def main():
         description=(
             "Combine multiple OpenMolcas ALTER files into one ALTER file.\n\n"
             "Each input ALTER file must be paired with the local active space used to create it.\n"
-            "The script applies all local swaps to the total active space and writes a final ALTER file."
+            "The script resolves each fragment's swaps independently, concatenates the resulting\n"
+            "target orbital lists, and reconstructs the final ALTER block for the whole molecule."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
@@ -179,20 +180,27 @@ def main():
                 f"Active-space list {idx + 1} contains orbitals not present in --total_active_space: {missing}"
             )
 
+    # Build the combined target by resolving each fragment's swaps independently.
+    # Each ALTER file is applied to a private copy of its local active space so that
+    # swaps from one fragment cannot interfere with the orbital positions of another.
+    # The resulting local target lists are then merged back into the global ordering
+    # defined by total_active.
     combined_target = list(total_active)
     for alter_file, local_active in zip(args.input, args.active_spaces):
         swaps = read_alter_swaps(alter_file)
+        # Work on an independent copy of this fragment's active space.
+        local_target = list(local_active)
         for target_orb, active_orb in swaps:
             if active_orb not in local_active:
                 raise ValueError(
                     f"In {alter_file}, swap orbital {active_orb} is not in its declared local active space {local_active}"
                 )
-            if active_orb not in combined_target:
-                raise ValueError(
-                    f"Cannot apply swap from {alter_file}: orbital {active_orb} is not present in current combined active space"
-                )
-            replace_idx = combined_target.index(active_orb)
-            combined_target[replace_idx] = target_orb
+            replace_idx = local_target.index(active_orb)
+            local_target[replace_idx] = target_orb
+        # Merge local result back: replace each original local orbital in combined_target
+        # with the corresponding post-swap orbital.
+        for orig_orb, new_orb in zip(local_active, local_target):
+            combined_target[combined_target.index(orig_orb)] = new_orb
 
     write_alter_file(combined_target, total_active, args.output)
     print(f"Combined ALTER file written to {args.output}")
