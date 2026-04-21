@@ -180,27 +180,26 @@ def main():
                 f"Active-space list {idx + 1} contains orbitals not present in --total_active_space: {missing}"
             )
 
-    # Build the combined target by resolving each fragment's swaps independently.
-    # Each ALTER file is applied to a private copy of its local active space so that
-    # swaps from one fragment cannot interfere with the orbital positions of another.
-    # The resulting local target lists are then merged back into the global ordering
-    # defined by total_active.
-    combined_target = list(total_active)
+    # Step 1: For each ALTER file, identify the target MO list for that fragment.
+    # A dict-based replacement is used so that swaps within one file are all
+    # resolved against the *original* local active space — no sequential mutation.
+    orb_map = {}
     for alter_file, local_active in zip(args.input, args.active_spaces):
         swaps = read_alter_swaps(alter_file)
-        # Work on an independent copy of this fragment's active space.
-        local_target = list(local_active)
+        replacement = {}
         for target_orb, active_orb in swaps:
             if active_orb not in local_active:
                 raise ValueError(
                     f"In {alter_file}, swap orbital {active_orb} is not in its declared local active space {local_active}"
                 )
-            replace_idx = local_target.index(active_orb)
-            local_target[replace_idx] = target_orb
-        # Merge local result back: replace each original local orbital in combined_target
-        # with the corresponding post-swap orbital.
-        for orig_orb, new_orb in zip(local_active, local_target):
-            combined_target[combined_target.index(orig_orb)] = new_orb
+            replacement[active_orb] = target_orb
+        # local_target is the post-swap orbital list for this fragment.
+        local_target = [replacement.get(orb, orb) for orb in local_active]
+        orb_map.update(zip(local_active, local_target))
+
+    # Step 2: Assemble the combined target orbital list by substituting each
+    # local active orbital with its post-swap counterpart in the global ordering.
+    combined_target = [orb_map.get(orb, orb) for orb in total_active]
 
     write_alter_file(combined_target, total_active, args.output)
     print(f"Combined ALTER file written to {args.output}")
