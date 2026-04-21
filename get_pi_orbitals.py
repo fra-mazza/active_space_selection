@@ -331,7 +331,11 @@ def rank_pi_orbitals(scores, top_n):
         return []
     order = np.argsort(scores)[::-1]
     nout = min(top_n, len(order))
-    return [(int(order[i]) + 1, float(scores[order[i]])) for i in range(nout)]
+    ranked = []
+    for i in range(nout):
+        mo_zero_based = order[i]
+        ranked.append((int(mo_zero_based) + 1, float(scores[mo_zero_based])))
+    return ranked
 
 
 def resolve_alter_path(target_file, alter_arg):
@@ -343,8 +347,6 @@ def resolve_alter_path(target_file, alter_arg):
     - If --alter contains a directory, use it as provided.
     """
     target_dir = os.path.dirname(os.path.abspath(target_file))
-    if not os.path.isdir(target_dir):
-        target_dir = os.getcwd()
 
     if alter_arg:
         if os.path.dirname(alter_arg):
@@ -364,12 +366,18 @@ def write_alter_from_pi_selection(selected_pi_orbitals, active_space, alter_path
     """
     target_not_in_active = [t for t in selected_pi_orbitals if t not in active_space]
     active_not_in_target = [a for a in active_space if a not in selected_pi_orbitals]
+    if len(target_not_in_active) != len(active_not_in_target):
+        raise ValueError(
+            "Cannot build ALTER block: selected pi orbitals and active space produce "
+            "a different number of swap candidates."
+        )
 
     with open(alter_path, "w") as alterfile:
-        line = "ALTER = " + str(len(active_not_in_target)) + "; "
-        for i in range(len(active_not_in_target)):
-            line += f"1 {target_not_in_active[i]} {active_not_in_target[i]}; "
-        line += " * Generated automatically\n"
+        swaps = "".join(
+            f"1 {target_orb} {active_orb}; "
+            for target_orb, active_orb in zip(target_not_in_active, active_not_in_target)
+        )
+        line = f"ALTER = {len(active_not_in_target)}; {swaps} * Generated automatically\n"
         alterfile.write(line)
 
 
@@ -509,12 +517,12 @@ def main():
         print("Top pi orbitals used for ALTER:", selected_pi_orbitals)
         print(f"ALTER file written to: {alter_path}")
 
-        high_score_count = int(np.sum(scores > PI_SCORE_HIGH_THRESHOLD))
+        high_score_count = np.sum(scores > PI_SCORE_HIGH_THRESHOLD)
         if high_score_count > n_active:
             print(
                 "WARNING: More than N orbitals have high PiScore "
                 f"(>{PI_SCORE_HIGH_THRESHOLD:.1f}): {high_score_count} orbitals vs N={n_active}. "
-                "Consider increasing the active space."
+                "Important pi orbitals may be excluded; consider increasing the active space."
             )
 
 
