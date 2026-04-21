@@ -7,6 +7,7 @@ Workflow:
 2) Build per-atom p orbital(s) perpendicular to that plane in AO basis.
 3) Compute |<MO|p_perp>| and accumulate over all selected-atom p projectors.
 4) Rank MOs by accumulated pi-character and print top N.
+5) Optionally build an OpenMolcas ALTER block from top-ranked pi orbitals.
 """
 
 import argparse
@@ -25,6 +26,8 @@ except ImportError:  # pragma: no cover
 L_TO_NFUNCS = {"s": 1, "p": 3, "d": 5, "f": 7, "g": 9, "h": 11}
 # Numerical guard for near-zero projector norms in AO-overlap metric.
 PROJECTOR_NORM_EPS = 1e-14
+# Heuristic threshold requested by user for "high pi-score" orbitals.
+PI_SCORE_HIGH_THRESHOLD = 1.0
 
 
 def parse_range_or_value(item_str):
@@ -308,17 +311,66 @@ def save_projector_orbitals(target_file, projectors):
     return out_file
 
 
-def rank_pi_orbitals(C_mo, ao_overlap, projectors, top_n):
-    # score[k] = sum_i |<MO_k|p_i>|, with p_i the i-th normalized projector vector.
-    # Here <MO|p> = C_mo[k] @ ao_overlap @ p.
+def compute_pi_scores(C_mo, ao_overlap, projectors):
+    """
+    Compute the pi-score for every MO.
+
+    score[k] = sum_i |<MO_k|p_i>|, where p_i is the i-th normalized projector
+    and <MO|p> = C_mo[k] @ ao_overlap @ p.
+    """
     if not projectors:
-        return []
+        return np.array([], dtype=float)
     proj_mat = np.stack([p for _, p in projectors], axis=1)  # (nbasis, nproj)
     overlaps = C_mo @ ao_overlap @ proj_mat                   # (nmo, nproj)
-    scores = np.sum(np.abs(overlaps), axis=1)
+    return np.sum(np.abs(overlaps), axis=1)
+
+
+def rank_pi_orbitals(scores, top_n):
+    """Return top-N (1-based mo_index, score) pairs sorted by descending score."""
+    if len(scores) == 0:
+        return []
     order = np.argsort(scores)[::-1]
     nout = min(top_n, len(order))
     return [(int(order[i]) + 1, float(scores[order[i]])) for i in range(nout)]
+
+
+def resolve_alter_path(target_file, alter_arg):
+    """
+    Resolve ALTER output path using the same conventions as active_space_selection.py.
+
+    - If --alter is omitted, write ALTER.txt next to --target.
+    - If --alter is a bare filename, write it next to --target.
+    - If --alter contains a directory, use it as provided.
+    """
+    target_dir = os.path.dirname(os.path.abspath(target_file))
+    if not os.path.isdir(target_dir):
+        target_dir = os.getcwd()
+
+    if alter_arg:
+        if os.path.dirname(alter_arg):
+            return alter_arg
+        return os.path.join(target_dir, alter_arg)
+
+    return os.path.join(target_dir, "ALTER.txt")
+
+
+def write_alter_from_pi_selection(selected_pi_orbitals, active_space, alter_path):
+    """
+    Build and write an OpenMolcas ALTER block from selected pi-like orbitals.
+
+    This mirrors the target/active-space swap logic used in active_space_selection.py:
+    every orbital in selected_pi_orbitals that is not in active_space is swapped with
+    the corresponding orbital in active_space that is not in selected_pi_orbitals.
+    """
+    target_not_in_active = [t for t in selected_pi_orbitals if t not in active_space]
+    active_not_in_target = [a for a in active_space if a not in selected_pi_orbitals]
+
+    with open(alter_path, "w") as alterfile:
+        line = "ALTER = " + str(len(active_not_in_target)) + "; "
+        for i in range(len(active_not_in_target)):
+            line += f"1 {target_not_in_active[i]} {active_not_in_target[i]}; "
+        line += " * Generated automatically\n"
+        alterfile.write(line)
 
 
 def get_molden_ao_overlap(filename):
@@ -352,19 +404,46 @@ def main():
         default=0.10,
         help="Warn if max atom-to-plane distance exceeds this value (same coordinate units as input).",
     )
+    parser.add_argument(
+        "--active_space",
+        required=False,
+        nargs="+",
+        action=ParseMixedListAction,
+        default=[],
+        metavar="ACTIVE",
+        help=(
+            "(Optional) Active-space orbital indices (1-based) used to auto-build ALTER.\n"
+            "If provided, the script selects the top N orbitals by PiScore where N is\n"
+            "the number of active orbitals."
+        ),
+    )
+    parser.add_argument(
+        "--alter",
+        required=False,
+        default=None,
+        metavar="ALTER_FILE",
+        help=(
+            "(Optional) Name/path for generated ALTER file when --active_space is used.\n"
+            "Defaults to ALTER.txt in the target-file directory."
+        ),
+    )
     args = parser.parse_args()
 
     if args.top_n <= 0:
         raise ValueError("--top_n must be a positive integer.")
     if not args.atoms:
         raise ValueError("--atoms must not be empty.")
+    if args.alter and not args.active_space:
+        raise ValueError("--alter requires --active_space.")
 
+    # --- 1) Read geometry and verify selected atoms ---
     coords = extract_atom_coords(args.target)
     natoms = coords.shape[0]
     selected = sorted(set(args.atoms))
     if min(selected) < 1 or max(selected) > natoms:
         raise ValueError(f"Atom indices out of range: valid interval is [1, {natoms}].")
 
+    # --- 2) Build best-fit plane from selected atoms and print diagnostics ---
     sel_coords = coords[np.array(selected) - 1]
     _, normal, distances = best_fit_plane(sel_coords)
 
@@ -378,6 +457,7 @@ def main():
             f"(max distance {np.max(distances):.6f} > threshold {args.planarity_threshold:.6f})."
         )
 
+    # --- 3) Load MO coefficients / AO overlap and identify p-shell blocks ---
     if is_h5_file(args.target):
         C_mo, S_ao, bf_ids = load_h5_data(args.target)
         p_blocks = h5_p_blocks_by_atom(bf_ids, natoms)
@@ -386,6 +466,7 @@ def main():
         S_ao = get_molden_ao_overlap(args.target)
         p_blocks, _ = parse_molden_gto_for_p_blocks(args.target)
 
+    # --- 4) Build and normalize per-atom perpendicular p projectors ---
     projectors = build_pi_projectors(C_mo.shape[1], p_blocks, selected, normal)
     projectors = normalize_projectors(projectors, S_ao)
     if not projectors:
@@ -402,12 +483,39 @@ def main():
     projector_file = save_projector_orbitals(args.target, projectors)
     print(f"Saved pi projectors to: {projector_file}")
 
-    ranked = rank_pi_orbitals(C_mo, S_ao, projectors, args.top_n)
+    # --- 5) Score all MOs and print ranked list ---
+    scores = compute_pi_scores(C_mo, S_ao, projectors)
+    ranked = rank_pi_orbitals(scores, args.top_n)
 
     print("\nTop orbitals by pi character:")
     print("  MO   PiScore")
     for mo_idx, score in ranked:
         print(f"{mo_idx:4d}  {score:.6f}")
+
+    # If an active space was provided, automatically create an ALTER file using
+    # the top-N pi orbitals, where N is the active-space size.
+    if args.active_space:
+        if min(args.active_space) < 1 or max(args.active_space) > C_mo.shape[0]:
+            raise ValueError(
+                f"Active-space orbital indices out of range: valid interval is [1, {C_mo.shape[0]}]."
+            )
+        n_active = len(args.active_space)
+        top_for_active = rank_pi_orbitals(scores, n_active)
+        selected_pi_orbitals = [mo_idx for mo_idx, _ in top_for_active]
+        alter_path = resolve_alter_path(args.target, args.alter)
+        write_alter_from_pi_selection(selected_pi_orbitals, args.active_space, alter_path)
+
+        print(f"\nActive-space size: {n_active}")
+        print("Top pi orbitals used for ALTER:", selected_pi_orbitals)
+        print(f"ALTER file written to: {alter_path}")
+
+        high_score_count = int(np.sum(scores > PI_SCORE_HIGH_THRESHOLD))
+        if high_score_count > n_active:
+            print(
+                "WARNING: More than N orbitals have high PiScore "
+                f"(>{PI_SCORE_HIGH_THRESHOLD:.1f}): {high_score_count} orbitals vs N={n_active}. "
+                "Consider increasing the active space."
+            )
 
 
 if __name__ == "__main__":

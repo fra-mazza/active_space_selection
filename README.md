@@ -142,7 +142,9 @@ python get_pi_orbitals.py \
     --target <target.molden|target.h5> \
     --atoms <atom_list> \
     [--top_n 20] \
-    [--planarity_threshold 0.10]
+    [--planarity_threshold 0.10] \
+    [--active_space <active_orb_list>] \
+    [--alter <ALTER_FILE>]
 ```
 
 ### Arguments
@@ -153,6 +155,8 @@ python get_pi_orbitals.py \
 | `--atoms` | yes | Selected atom indices (1-based), with commas/ranges (e.g. `1,3-8`). |
 | `--top_n` | no | Number of top orbitals to print (default: `20`). |
 | `--planarity_threshold` | no | Warning threshold for max atom-to-plane distance (same units as input coordinates; default: `0.10`). |
+| `--active_space` | no | Active-space orbital indices (1-based). If provided, the script automatically selects the top `N` orbitals by PiScore (`N = len(active_space)`) and writes an OpenMolcas `ALTER` block. |
+| `--alter` | no | Output name/path for the generated `ALTER` file (used with `--active_space`). Default: `ALTER.txt` in the target-file directory. |
 
 ### Detailed workflow
 
