@@ -5,8 +5,8 @@ Identify pi-like molecular orbitals for a (quasi-)planar atom subset.
 Workflow:
 1) Fit best plane through selected atoms.
 2) Build per-atom p orbital(s) perpendicular to that plane in AO basis,
-   weighting each contracted p-shell by its maximum primitive exponent so
-   that inner (compact) shells contribute more than diffuse outer shells.
+   weighting each contracted p-shell by Σ c_i² · α_i so that inner
+   (compact) shells contribute more than diffuse outer shells.
 3) Compute |<MO|p_perp>| and accumulate over all selected-atom p projectors.
 4) Rank MOs by accumulated pi-character and print top N.
 5) Optionally build an OpenMolcas ALTER block from top-ranked pi orbitals.
@@ -259,19 +259,20 @@ def h5_p_blocks_by_atom(bf_ids, natoms, filename=None):
         Total number of atoms (used to infer the center-index base).
     filename : str or None
         Path to the same HDF5 file.  When provided, the ``PRIMITIVES`` and
-        ``PRIMITIVE_IDS`` datasets are read to compute the maximum primitive
-        exponent for each contracted p-shell.  This exponent is used as an
-        unnormalized weight: larger exponent → more compact (inner) shell →
-        higher weight in the pi projector.  When *None*, a rank-based fallback
-        is used: the first p-shell for each atom (smallest AO index) receives
-        weight 1, the second 1/2, the third 1/3, etc.
+        ``PRIMITIVE_IDS`` datasets are read to compute a compactness weight
+        ``Σ_i c_i² · α_i`` for each contracted p-shell (identical to the
+        metric used in the Molden code path).  This is systematically larger
+        for tight (inner) contractions than for diffuse ones, even in general
+        contraction schemes where multiple shells share the same primitives.
+        When *None*, a rank-based fallback is used: the first p-shell for each
+        atom receives weight 1, the second 1/2, the third 1/3, etc.
 
     Returns
     -------
     p_blocks : dict  {atom_1based: [[ao_x, ao_y, ao_z], ...]}
         AO index triples for each contracted p-shell.
-    p_shell_max_exps : dict  {atom_1based: [weight, ...]}
-        Unnormalized weight for each p-shell, in the same order as *p_blocks*.
+    p_shell_weights : dict  {atom_1based: [weight, ...]}
+        Compactness weight for each p-shell, in the same order as *p_blocks*.
     """
     p_blocks = {}
     base = infer_h5_atom_index_base(bf_ids, natoms)
@@ -284,10 +285,13 @@ def h5_p_blocks_by_atom(bf_ids, natoms, filename=None):
         key = (atom_1based, shell)
         groups.setdefault(key, []).append((ao_idx, m))
 
-    # Build max-exponent lookup from PRIMITIVE_IDS / PRIMITIVES (if available).
+    # Build compactness-weight lookup from PRIMITIVE_IDS / PRIMITIVES (if available).
     # PRIMITIVE_IDS columns: (center, l, contracted_shell_1based).
     # PRIMITIVES columns:    (exponent, contraction_coefficient).
-    max_exp_lookup = {}  # key: (center_in_prim, shell_in_prim) for l==1
+    # Weight = Σ_i c_i² · α_i — identical to the metric used in the Molden path.
+    # This is larger for compact (inner) contractions and correctly handles general
+    # contraction schemes where multiple contracted shells share the same primitives.
+    weight_lookup = {}  # key: (center_in_prim, shell_in_prim) for l==1
     if filename is not None and _H5PY_AVAILABLE:
         try:
             with h5py.File(filename, "r") as f:
@@ -298,32 +302,36 @@ def h5_p_blocks_by_atom(bf_ids, natoms, filename=None):
                 c_p, l_p, s_p = int(prim_ids[i, 0]), int(prim_ids[i, 1]), int(prim_ids[i, 2])
                 if l_p == 1:
                     key = (c_p, s_p)
-                    exp = abs(float(primitives[i, 0]))
-                    max_exp_lookup[key] = max(max_exp_lookup.get(key, 0.0), exp)
+                    alpha = abs(float(primitives[i, 0]))
+                    coeff = float(primitives[i, 1])
+                    weight_lookup[key] = weight_lookup.get(key, 0.0) + coeff ** 2 * alpha
         except Exception:
             # If reading fails for any reason, fall back to rank-based weights.
-            max_exp_lookup = {}
+            weight_lookup = {}
 
-    p_shell_max_exps = {}
+    p_shell_weights = {}
     for (atom_1based, shell), items in groups.items():
         m_to_idx = {m: idx for idx, m in items}
         if all(m in m_to_idx for m in (1, -1, 0)):
             # Reconstruct the same real-p component order used in the Molden code path.
             p_blocks.setdefault(atom_1based, []).append([m_to_idx[1], m_to_idx[-1], m_to_idx[0]])
-            if max_exp_lookup:
+            if weight_lookup:
                 # Convert atom_1based back to the center index used in PRIMITIVE_IDS.
                 # PRIMITIVE_IDS uses the same raw center stored in BASIS_FUNCTION_IDS
                 # (before the 1-base correction), so we reverse the correction here.
                 c_prim = atom_1based - (1 - base)
-                exp = max_exp_lookup.get((c_prim, shell), 1.0)
+                w = weight_lookup.get((c_prim, shell), 0.0)
+                # Fallback: if the lookup yielded zero (e.g. pure-zero contraction),
+                # assign a small positive placeholder so the shell is not silently dropped.
+                w = w if w > 0.0 else 1e-6
             else:
                 # Rank-based fallback: rank 0 (first p-shell = most compact) → 1.0,
                 # rank 1 → 0.5, rank 2 → 0.333, ...
                 rank = len(p_blocks.get(atom_1based, [])) - 1
-                exp = 1.0 / (rank + 1)
-            p_shell_max_exps.setdefault(atom_1based, []).append(exp)
+                w = 1.0 / (rank + 1)
+            p_shell_weights.setdefault(atom_1based, []).append(w)
 
-    return p_blocks, p_shell_max_exps
+    return p_blocks, p_shell_weights
 
 
 def best_fit_plane(coords):
@@ -360,9 +368,10 @@ def build_pi_projectors(nbasis, p_blocks_by_atom, selected_atoms, normal, shell_
     shell_weights : dict  {atom_1based: [w0, w1, ...]} or None
         Unnormalized weight for each contracted p-shell of each atom.  A larger
         weight makes that shell's contribution dominate the projector.  The
-        natural choice is the maximum primitive exponent of the contraction
-        (larger exponent = more compact = inner p-orbital).  When *None* all
-        shells are treated equally (original behaviour).
+        natural choice is ``Σ_i c_i² · α_i`` (sum of squared contraction
+        coefficient times exponent), which is systematically larger for
+        compact (inner) shells than for diffuse (outer) shells.  When *None*
+        all shells are treated equally (original behaviour).
 
     Returns
     -------
@@ -609,20 +618,20 @@ def main():
     # --- 3) Load MO coefficients / AO overlap and identify p-shell blocks ---
     if is_h5_file(args.target):
         C_mo, S_ao, bf_ids = load_h5_data(args.target)
-        # Pass the filename so that PRIMITIVE_IDS / PRIMITIVES are read for
-        # exponent-based shell weighting.  Falls back to rank-based weights
-        # automatically if those datasets are absent.
+        # Pass the filename so that PRIMITIVE_IDS / PRIMITIVES are read to
+        # compute Σ c²·α compactness weights.  Falls back to rank-based
+        # weights automatically if those datasets are absent.
         p_blocks, p_shell_exps = h5_p_blocks_by_atom(bf_ids, natoms, filename=args.target)
     else:
         C_mo = load_molden_mo_coeff_matrix(args.target)
         S_ao = get_molden_ao_overlap(args.target)
-        # parse_molden_gto_for_p_blocks now also returns the max primitive
-        # exponent for each contracted p-shell.
+        # parse_molden_gto_for_p_blocks also returns Σ c²·α compactness
+        # weights for each contracted p-shell.
         p_blocks, p_shell_exps, _ = parse_molden_gto_for_p_blocks(args.target)
 
     # --- 4) Build and normalize per-atom perpendicular p projectors ---
-    # shell_weights = max-exponent dict so that inner (compact) p-shells
-    # contribute more to the projector than diffuse outer shells.
+    # shell_weights = Σ c²·α compactness weights so that inner (compact)
+    # p-shells contribute more to the projector than diffuse outer shells.
     projectors = build_pi_projectors(C_mo.shape[1], p_blocks, selected, normal, shell_weights=p_shell_exps)
     projectors = normalize_projectors(projectors, S_ao)
     if not projectors:
