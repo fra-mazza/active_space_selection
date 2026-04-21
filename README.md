@@ -129,6 +129,41 @@ The output `rotate.csv`, `rotated.h5`, and `ALTER.txt` are written to `test/phen
 
 ---
 
+## Combine multiple ALTER files
+
+If distinct molecular regions (e.g. two aromatic rings) are treated separately, you can merge multiple partial `ALTER` files into one final file with `combine_alter_files.py`.
+
+### Usage
+
+```bash
+python combine_alter_files.py \
+    -i <ALTER1.txt> <ALTER2.txt> [<ALTER3.txt> ...] \
+    --active_spaces <active_list_1>[:<active_list_2>[:...]] \
+    --total_active_space <full_active_list> \
+    [-o <ALTER_total.txt>]
+```
+
+### Arguments
+
+| Argument | Required | Description |
+|---|---|---|
+| `-i`, `--input` | yes | List of input `ALTER` files to combine (space-separated). |
+| `--active_spaces` | yes | Active-space lists used to generate each input file (same order as `--input`). Use commas for values, hyphens for ranges, and colons to separate lists. Example: `19-23:30-34`. |
+| `--total_active_space` | yes | Total active space of the full molecule. Example: `19-23,30-34`. |
+| `-o`, `--output` | no | Output file name/path for the merged ALTER block. Default: `ALTER.txt`. |
+
+### Example
+
+```bash
+python combine_alter_files.py \
+    -i ALTER1.txt ALTER2.txt \
+    --active_spaces 19-23:30-34 \
+    --total_active_space 19-23,30-34 \
+    -o ALTER_total.txt
+```
+
+---
+
 ## HDF5 mode – how it works
 
 OpenMolcas writes an HDF5 checkpoint file (`.h5`) that contains, among other things:
