@@ -4,7 +4,9 @@ Identify pi-like molecular orbitals for a (quasi-)planar atom subset.
 
 Workflow:
 1) Fit best plane through selected atoms.
-2) Build per-atom p orbital(s) perpendicular to that plane in AO basis.
+2) Build per-atom p orbital(s) perpendicular to that plane in AO basis,
+   weighting each contracted p-shell by its maximum primitive exponent so
+   that inner (compact) shells contribute more than diffuse outer shells.
 3) Compute |<MO|p_perp>| and accumulate over all selected-atom p projectors.
 4) Rank MOs by accumulated pi-character and print top N.
 5) Optionally build an OpenMolcas ALTER block from top-ranked pi orbitals.
@@ -130,6 +132,26 @@ def parse_mo_block(mo_text):
 
 
 def parse_molden_gto_for_p_blocks(filename):
+    """
+    Parse the [GTO] section of a Molden file to extract contracted p-shell data.
+
+    For each atom, the function records:
+      - The AO indices (x, y, z) for every contracted p-shell.
+      - A compactness weight for each contraction, defined as
+        ``Σ_i c_i² · α_i`` (sum of squared contraction coefficient times
+        exponent over all primitives in the shell).  This is larger for tight
+        (inner) shells than for diffuse (outer) shells, and is used as an
+        unnormalized weight when building the pi projector.
+
+    Returns
+    -------
+    p_blocks_by_atom : dict  {atom_1based: [[ao_x, ao_y, ao_z], ...]}
+        AO indices for each contracted p-shell, in order of appearance.
+    p_shell_weights : dict  {atom_1based: [w_shell1, ...]}
+        Compactness weight for each p-shell (same ordering as above).
+    ao_idx : int
+        Total number of AO basis functions encountered.
+    """
     with open(filename, "r") as f:
         content = f.read()
     match = re.search(r"(?si)\[GTO\].*?(?=\n\[|$)", content)
@@ -138,6 +160,7 @@ def parse_molden_gto_for_p_blocks(filename):
     lines = match.group(0).splitlines()[1:]
 
     p_blocks_by_atom = {}
+    p_shell_weights = {}
     ao_idx = 0
     current_atom = None
     i = 0
@@ -164,11 +187,28 @@ def parse_molden_gto_for_p_blocks(filename):
                 # Canonical real-p component ordering used by this script/repository:
                 # [component_x, component_y, component_z].
                 p_blocks_by_atom.setdefault(current_atom, []).append([ao_idx, ao_idx + 1, ao_idx + 2])
+                # Compute the compactness weight Σ c_i² · α_i for this shell.
+                # This equals the kinetic-energy-like contribution of the contraction
+                # and is systematically larger for compact (inner) shells than for
+                # diffuse (outer) shells, even when the same primitives appear in
+                # multiple contractions (general contraction scheme).
+                weight = 0.0
+                for k in range(nprim):
+                    parts = lines[i + k].strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            alpha = abs(float(parts[0]))
+                            coeff = float(parts[1])
+                            weight += coeff ** 2 * alpha
+                        except ValueError:
+                            pass
+                # Fallback: if parsing yields zero, assign a positive placeholder.
+                p_shell_weights.setdefault(current_atom, []).append(weight if weight > 0.0 else 1.0)
             ao_idx += nfunc
             i += nprim
             continue
 
-    return p_blocks_by_atom, ao_idx
+    return p_blocks_by_atom, p_shell_weights, ao_idx
 
 
 def load_molden_mo_coeff_matrix(filename):
@@ -206,7 +246,33 @@ def infer_h5_atom_index_base(bf_ids, natoms):
     return 1
 
 
-def h5_p_blocks_by_atom(bf_ids, natoms):
+def h5_p_blocks_by_atom(bf_ids, natoms, filename=None):
+    """
+    Build a per-atom list of contracted p-shell AO index groups.
+
+    Parameters
+    ----------
+    bf_ids : ndarray, shape (n_basis, 4)
+        ``BASIS_FUNCTION_IDS`` array from the OpenMolcas HDF5 file.
+        Columns: (center, shell_index, l, m).
+    natoms : int
+        Total number of atoms (used to infer the center-index base).
+    filename : str or None
+        Path to the same HDF5 file.  When provided, the ``PRIMITIVES`` and
+        ``PRIMITIVE_IDS`` datasets are read to compute the maximum primitive
+        exponent for each contracted p-shell.  This exponent is used as an
+        unnormalized weight: larger exponent → more compact (inner) shell →
+        higher weight in the pi projector.  When *None*, a rank-based fallback
+        is used: the first p-shell for each atom (smallest AO index) receives
+        weight 1, the second 1/2, the third 1/3, etc.
+
+    Returns
+    -------
+    p_blocks : dict  {atom_1based: [[ao_x, ao_y, ao_z], ...]}
+        AO index triples for each contracted p-shell.
+    p_shell_max_exps : dict  {atom_1based: [weight, ...]}
+        Unnormalized weight for each p-shell, in the same order as *p_blocks*.
+    """
     p_blocks = {}
     base = infer_h5_atom_index_base(bf_ids, natoms)
     groups = {}
@@ -218,12 +284,46 @@ def h5_p_blocks_by_atom(bf_ids, natoms):
         key = (atom_1based, shell)
         groups.setdefault(key, []).append((ao_idx, m))
 
-    for (atom_1based, _shell), items in groups.items():
+    # Build max-exponent lookup from PRIMITIVE_IDS / PRIMITIVES (if available).
+    # PRIMITIVE_IDS columns: (center, l, contracted_shell_1based).
+    # PRIMITIVES columns:    (exponent, contraction_coefficient).
+    max_exp_lookup = {}  # key: (center_in_prim, shell_in_prim) for l==1
+    if filename is not None and _H5PY_AVAILABLE:
+        try:
+            with h5py.File(filename, "r") as f:
+                if "PRIMITIVE_IDS" in f and "PRIMITIVES" in f:
+                    prim_ids = np.array(f["PRIMITIVE_IDS"], dtype=int)
+                    primitives = np.array(f["PRIMITIVES"], dtype=float)
+            for i in range(len(prim_ids)):
+                c_p, l_p, s_p = int(prim_ids[i, 0]), int(prim_ids[i, 1]), int(prim_ids[i, 2])
+                if l_p == 1:
+                    key = (c_p, s_p)
+                    exp = abs(float(primitives[i, 0]))
+                    max_exp_lookup[key] = max(max_exp_lookup.get(key, 0.0), exp)
+        except Exception:
+            # If reading fails for any reason, fall back to rank-based weights.
+            max_exp_lookup = {}
+
+    p_shell_max_exps = {}
+    for (atom_1based, shell), items in groups.items():
         m_to_idx = {m: idx for idx, m in items}
         if all(m in m_to_idx for m in (1, -1, 0)):
             # Reconstruct the same real-p component order used in the Molden code path.
             p_blocks.setdefault(atom_1based, []).append([m_to_idx[1], m_to_idx[-1], m_to_idx[0]])
-    return p_blocks
+            if max_exp_lookup:
+                # Convert atom_1based back to the center index used in PRIMITIVE_IDS.
+                # PRIMITIVE_IDS uses the same raw center stored in BASIS_FUNCTION_IDS
+                # (before the 1-base correction), so we reverse the correction here.
+                c_prim = atom_1based - (1 - base)
+                exp = max_exp_lookup.get((c_prim, shell), 1.0)
+            else:
+                # Rank-based fallback: rank 0 (first p-shell = most compact) → 1.0,
+                # rank 1 → 0.5, rank 2 → 0.333, ...
+                rank = len(p_blocks.get(atom_1based, [])) - 1
+                exp = 1.0 / (rank + 1)
+            p_shell_max_exps.setdefault(atom_1based, []).append(exp)
+
+    return p_blocks, p_shell_max_exps
 
 
 def best_fit_plane(coords):
@@ -236,15 +336,56 @@ def best_fit_plane(coords):
     return centroid, normal, distances
 
 
-def build_pi_projectors(nbasis, p_blocks_by_atom, selected_atoms, normal):
+def build_pi_projectors(nbasis, p_blocks_by_atom, selected_atoms, normal, shell_weights=None):
+    """
+    Build one perpendicular-p projector vector per selected atom.
+
+    For each atom the projector is a weighted sum of all contracted p-shells:
+
+        p_⊥ = Σ_shells  w_shell · (n_x · p_x + n_y · p_y + n_z · p_z)
+
+    where (n_x, n_y, n_z) is the plane normal and w_shell is the shell weight.
+
+    Parameters
+    ----------
+    nbasis : int
+        Total number of AO basis functions.
+    p_blocks_by_atom : dict  {atom_1based: [[ao_x, ao_y, ao_z], ...]}
+        AO index triples for each contracted p-shell (from the Molden/HDF5
+        parsing functions).
+    selected_atoms : list of int
+        1-based atom indices to include.
+    normal : ndarray, shape (3,)
+        Unit normal to the best-fit molecular plane.
+    shell_weights : dict  {atom_1based: [w0, w1, ...]} or None
+        Unnormalized weight for each contracted p-shell of each atom.  A larger
+        weight makes that shell's contribution dominate the projector.  The
+        natural choice is the maximum primitive exponent of the contraction
+        (larger exponent = more compact = inner p-orbital).  When *None* all
+        shells are treated equally (original behaviour).
+
+    Returns
+    -------
+    projectors : list of (atom_1based, ndarray)
+        Raw (un-normalized) projector vectors in the AO basis.
+    """
     projectors = []
     for atom in selected_atoms:
         atom_blocks = p_blocks_by_atom.get(atom, [])
         if not atom_blocks:
             continue
         vec = np.zeros(nbasis, dtype=float)
-        for block in atom_blocks:
-            vec[block] = normal
+
+        if shell_weights and atom in shell_weights:
+            weights = shell_weights[atom]
+        else:
+            # Equal weighting: every contracted p-shell contributes the same amount.
+            weights = [1.0] * len(atom_blocks)
+
+        for block, w in zip(atom_blocks, weights):
+            # Scale the normal-direction p-components of this shell by its weight.
+            vec[block] = np.asarray(normal) * w
+
         projectors.append((atom, vec))
     return projectors
 
@@ -468,14 +609,21 @@ def main():
     # --- 3) Load MO coefficients / AO overlap and identify p-shell blocks ---
     if is_h5_file(args.target):
         C_mo, S_ao, bf_ids = load_h5_data(args.target)
-        p_blocks = h5_p_blocks_by_atom(bf_ids, natoms)
+        # Pass the filename so that PRIMITIVE_IDS / PRIMITIVES are read for
+        # exponent-based shell weighting.  Falls back to rank-based weights
+        # automatically if those datasets are absent.
+        p_blocks, p_shell_exps = h5_p_blocks_by_atom(bf_ids, natoms, filename=args.target)
     else:
         C_mo = load_molden_mo_coeff_matrix(args.target)
         S_ao = get_molden_ao_overlap(args.target)
-        p_blocks, _ = parse_molden_gto_for_p_blocks(args.target)
+        # parse_molden_gto_for_p_blocks now also returns the max primitive
+        # exponent for each contracted p-shell.
+        p_blocks, p_shell_exps, _ = parse_molden_gto_for_p_blocks(args.target)
 
     # --- 4) Build and normalize per-atom perpendicular p projectors ---
-    projectors = build_pi_projectors(C_mo.shape[1], p_blocks, selected, normal)
+    # shell_weights = max-exponent dict so that inner (compact) p-shells
+    # contribute more to the projector than diffuse outer shells.
+    projectors = build_pi_projectors(C_mo.shape[1], p_blocks, selected, normal, shell_weights=p_shell_exps)
     projectors = normalize_projectors(projectors, S_ao)
     if not projectors:
         raise ValueError(
