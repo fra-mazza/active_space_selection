@@ -10,6 +10,7 @@ Workflow:
 """
 
 import argparse
+import os
 import re
 import numpy as np
 
@@ -235,20 +236,76 @@ def best_fit_plane(coords):
 def build_pi_projectors(nbasis, p_blocks_by_atom, selected_atoms, normal):
     projectors = []
     for atom in selected_atoms:
-        for block in p_blocks_by_atom.get(atom, []):
-            vec = np.zeros(nbasis, dtype=float)
+        atom_blocks = p_blocks_by_atom.get(atom, [])
+        if not atom_blocks:
+            continue
+        vec = np.zeros(nbasis, dtype=float)
+        for block in atom_blocks:
             vec[block] = normal
-            projectors.append((atom, vec))
+        projectors.append((atom, vec))
     return projectors
 
 
 def normalize_projectors(projectors, ao_overlap):
     normed = []
     for atom, vec in projectors:
-            n2 = float(vec @ ao_overlap @ vec)
+        n2 = float(vec @ ao_overlap @ vec)
         if n2 > PROJECTOR_NORM_EPS:
             normed.append((atom, vec / np.sqrt(n2)))
     return normed
+
+
+def write_projectors_molden(target_molden, output_molden, projectors):
+    sections = parse_molden_sections(target_molden)
+    mo_lines = ["[MO]"]
+    for atom, vec in projectors:
+        mo_lines.extend(
+            [
+                f" Sym= P_ATOM_{atom}",
+                " Ene= 0.00000000",
+                " Spin= Alpha",
+                " Occup= 0.00000000",
+            ]
+        )
+        for i, coeff in enumerate(vec, start=1):
+            mo_lines.append(f" {i:5d} {coeff: .12e}")
+    mo_section = "\n".join(mo_lines)
+
+    with open(output_molden, "w") as f:
+        for header, sec_text in sections:
+            if header.strip().upper().startswith("[MO]"):
+                f.write(mo_section + "\n")
+            else:
+                f.write(sec_text + "\n")
+
+
+def write_projectors_h5(target_h5, output_h5, projectors):
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to write HDF5 files: pip install h5py")
+    projector_matrix = np.stack([vec for _, vec in projectors], axis=0)
+    projector_atoms = np.array([atom for atom, _ in projectors], dtype=int)
+
+    with h5py.File(target_h5, "r") as src, h5py.File(output_h5, "w") as dst:
+        for attr_name, attr_val in src.attrs.items():
+            dst.attrs[attr_name] = attr_val
+        for key in src:
+            if key == "MO_VECTORS":
+                dst.create_dataset("MO_VECTORS", data=projector_matrix)
+            else:
+                src.copy(key, dst)
+        dst.create_dataset("PI_PROJECTOR_ATOMS", data=projector_atoms)
+        dst.attrs["N_PI_PROJECTORS"] = int(projector_matrix.shape[0])
+
+
+def save_projector_orbitals(target_file, projectors):
+    out_dir = os.path.dirname(os.path.abspath(target_file))
+    if is_h5_file(target_file):
+        out_file = os.path.join(out_dir, "pi_projectors.h5")
+        write_projectors_h5(target_file, out_file, projectors)
+    else:
+        out_file = os.path.join(out_dir, "pi_projectors.molden")
+        write_projectors_molden(target_file, out_file, projectors)
+    return out_file
 
 
 def rank_pi_orbitals(C_mo, ao_overlap, projectors, top_n):
@@ -341,6 +398,9 @@ def main():
     missing = [a for a in selected if a not in used_atoms]
     if missing:
         print(f"WARNING: no p-shells found for selected atoms: {missing}")
+
+    projector_file = save_projector_orbitals(args.target, projectors)
+    print(f"Saved pi projectors to: {projector_file}")
 
     ranked = rank_pi_orbitals(C_mo, S_ao, projectors, args.top_n)
 
