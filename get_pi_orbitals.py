@@ -389,11 +389,18 @@ def build_pi_projectors(nbasis, p_blocks_by_atom, selected_atoms, normal, shell_
 
         if shell_weights and atom in shell_weights:
             raw_weights = np.asarray(shell_weights[atom], dtype=float)
-            if raw_weights.shape[0] == len(atom_blocks) and np.any(raw_weights > 0.0):
+            if raw_weights.shape[0] == len(atom_blocks):
                 # Normalize by the atom-local maximum and amplify contrast so
                 # compact (inner) shells dominate more over diffuse shells.
+                # Using an atom-local normalization preserves each atom's
+                # internal shell hierarchy without biasing against atoms that
+                # happen to have uniformly smaller absolute shell metrics.
                 raw_weights = np.clip(raw_weights, 0.0, None)
-                weights = (raw_weights / np.max(raw_weights)) ** SHELL_WEIGHT_EXPONENT
+                max_weight = float(np.max(raw_weights))
+                if max_weight > 0.0:
+                    weights = (raw_weights / max_weight) ** SHELL_WEIGHT_EXPONENT
+                else:
+                    weights = np.ones(len(atom_blocks), dtype=float)
             else:
                 weights = np.ones(len(atom_blocks), dtype=float)
         else:
