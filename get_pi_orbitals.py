@@ -28,6 +28,8 @@ except ImportError:  # pragma: no cover
 L_TO_NFUNCS = {"s": 1, "p": 3, "d": 5, "f": 7, "g": 9, "h": 11}
 # Numerical guard for near-zero projector norms in AO-overlap metric.
 PROJECTOR_NORM_EPS = 1e-14
+# Fallback weight for shells with non-positive compactness metric.
+MIN_SHELL_WEIGHT_FALLBACK = 1e-6
 # Exponent used to enhance compact-vs-diffuse p-shell weighting.
 SHELL_WEIGHT_EXPONENT = 2.0
 # Heuristic threshold requested by user for "high pi-score" orbitals.
@@ -233,9 +235,29 @@ def load_h5_data(filename):
     if not _H5PY_AVAILABLE:
         raise ImportError("h5py is required to read HDF5 files: pip install h5py")
     with h5py.File(filename, "r") as f:
-        n = int(np.sqrt(len(f["MO_VECTORS"])))
-        C = np.array(f["MO_VECTORS"], dtype=float).reshape(n, n)
-        S = np.array(f["AO_OVERLAP_MATRIX"], dtype=float).reshape(n, n)
+        mo_raw = np.array(f["MO_VECTORS"], dtype=float)
+        ov_raw = np.array(f["AO_OVERLAP_MATRIX"], dtype=float)
+        n_basis = int(round(np.sqrt(ov_raw.size)))
+        if n_basis * n_basis != ov_raw.size:
+            raise ValueError(
+                f"AO_OVERLAP_MATRIX size {ov_raw.size} is not a perfect square in {filename}."
+            )
+        if mo_raw.ndim == 1:
+            if mo_raw.size % n_basis != 0:
+                raise ValueError(
+                    f"MO_VECTORS size {mo_raw.size} is not compatible with n_basis={n_basis} in {filename}."
+                )
+            n_mo = mo_raw.size // n_basis
+            C = mo_raw.reshape(n_mo, n_basis)
+        elif mo_raw.ndim == 2:
+            if mo_raw.shape[1] != n_basis:
+                raise ValueError(
+                    f"MO_VECTORS shape {mo_raw.shape} is not compatible with n_basis={n_basis} in {filename}."
+                )
+            C = mo_raw
+        else:
+            raise ValueError(f"Unsupported MO_VECTORS rank {mo_raw.ndim} in {filename}.")
+        S = ov_raw.reshape(n_basis, n_basis)
         bf_ids = np.array(f["BASIS_FUNCTION_IDS"], dtype=int)
     return C, S, bf_ids
 
@@ -325,7 +347,7 @@ def h5_p_blocks_by_atom(bf_ids, natoms, filename=None):
                 w = weight_lookup.get((c_prim, shell), 0.0)
                 # Fallback: if the lookup yielded zero (e.g. pure-zero contraction),
                 # assign a small positive placeholder so the shell is not silently dropped.
-                w = w if w > 0.0 else 1e-6
+                w = w if w > 0.0 else MIN_SHELL_WEIGHT_FALLBACK
             else:
                 # Rank-based fallback: rank 0 (first p-shell = most compact) → 1.0,
                 # rank 1 → 0.5, rank 2 → 0.333, ...
