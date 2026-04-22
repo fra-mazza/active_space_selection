@@ -28,6 +28,8 @@ except ImportError:  # pragma: no cover
 L_TO_NFUNCS = {"s": 1, "p": 3, "d": 5, "f": 7, "g": 9, "h": 11}
 # Numerical guard for near-zero projector norms in AO-overlap metric.
 PROJECTOR_NORM_EPS = 1e-14
+# Exponent used to enhance compact-vs-diffuse p-shell weighting.
+SHELL_WEIGHT_EXPONENT = 2.0
 # Heuristic threshold requested by user for "high pi-score" orbitals.
 PI_SCORE_HIGH_THRESHOLD = 1.0
 
@@ -386,10 +388,24 @@ def build_pi_projectors(nbasis, p_blocks_by_atom, selected_atoms, normal, shell_
         vec = np.zeros(nbasis, dtype=float)
 
         if shell_weights and atom in shell_weights:
-            weights = shell_weights[atom]
+            raw_weights = np.asarray(shell_weights[atom], dtype=float)
+            if raw_weights.shape[0] == len(atom_blocks):
+                # Normalize by the atom-local maximum and amplify contrast so
+                # compact (inner) shells dominate more over diffuse shells.
+                # Using an atom-local normalization preserves each atom's
+                # internal shell hierarchy without biasing against atoms that
+                # happen to have uniformly smaller absolute shell metrics.
+                raw_weights = np.clip(raw_weights, 0.0, None)
+                max_weight = float(np.max(raw_weights))
+                if max_weight > 0.0:
+                    weights = (raw_weights / max_weight) ** SHELL_WEIGHT_EXPONENT
+                else:
+                    weights = np.ones(len(atom_blocks), dtype=float)
+            else:
+                weights = np.ones(len(atom_blocks), dtype=float)
         else:
             # Equal weighting: every contracted p-shell contributes the same amount.
-            weights = [1.0] * len(atom_blocks)
+            weights = np.ones(len(atom_blocks), dtype=float)
 
         for block, w in zip(atom_blocks, weights):
             # Scale the normal-direction p-components of this shell by its weight.
@@ -443,7 +459,12 @@ def write_projectors_h5(target_h5, output_h5, projectors):
             dst.attrs[attr_name] = attr_val
         for key in src:
             if key == "MO_VECTORS":
-                dst.create_dataset("MO_VECTORS", data=projector_matrix)
+                # OpenMolcas stores MO_VECTORS as a flat 1-D array (row-major).
+                # Keep that layout so downstream readers expecting this shape
+                # can consume the projector file without broadcasting errors.
+                ds = dst.create_dataset("MO_VECTORS", data=projector_matrix.ravel())
+                for attr_name, attr_val in src[key].attrs.items():
+                    ds.attrs[attr_name] = attr_val
             else:
                 src.copy(key, dst)
         dst.create_dataset("PI_PROJECTOR_ATOMS", data=projector_atoms)
