@@ -35,7 +35,8 @@ The workflow implemented by this tool is:
 - [NumPy](https://numpy.org/) **≥ 1.20**
 - [SciPy](https://scipy.org/) **≥ 1.7, < 1.15** – SciPy ≥ 1.15 changes the `sph_harm` API and breaks sphecerix 0.5.0
 - [sphecerix](https://github.com/ifilot/sphecerix) **== 0.5.0** – Wigner D-matrix library for real (tesseral) spherical harmonics
-- **orbkit** (modified) – included in this repository as a Git submodule; the upstream version has been patched to correctly parse Molden files produced by **OpenMolcas**. Only required when using Molden input files.
+- [Cython](https://cython.org/) – required to compile the C extensions inside orbkit at install time
+- **orbkit** (modified) – included in this repository as a Git submodule; the upstream version has been patched to correctly parse Molden files produced by **OpenMolcas**. Only required when using Molden input files. Pulls in [matplotlib](https://matplotlib.org/) and [scikit-image](https://scikit-image.org/) as dependencies.
 - [h5py](https://www.h5py.org/) **≥ 3.0** – required only when using OpenMolcas HDF5 (`.h5`) input files
 
 ---
@@ -55,19 +56,73 @@ If you already cloned without `--recurse-submodules`, initialise the submodule a
 git submodule update --init --recursive
 ```
 
-### 2. Install the modified orbkit
+### 2. Install build prerequisites for orbkit
 
-The modified orbkit lives in the `orbkit/` subdirectory. Install it in editable mode so that any local patches are picked up automatically:
-
-```bash
-pip install -e orbkit/
-```
-
-### 3. Install the remaining Python dependencies
+orbkit contains Cython extensions that must be compiled during installation.
+NumPy is also required at build time (its header path is queried in `setup.py`).
+Install both — along with setuptools — before attempting to install orbkit:
 
 ```bash
-pip install "numpy>=1.20" "scipy>=1.7,<1.15" "sphecerix==0.5.0" "h5py>=3.0"
+pip install "numpy>=1.20" cython setuptools
 ```
+
+### 3. Install the modified orbkit
+
+The modified orbkit lives in the `orbkit/` subdirectory. Install it in editable
+mode so that any local patches are picked up automatically. This step also
+installs orbkit's runtime dependencies (matplotlib, scikit-image, h5py, …)
+automatically.
+
+> **Important – use `--no-build-isolation`.**  `orbkit/setup.py` imports
+> `Cython` at module level.  Modern pip (≥ 21.3) runs `setup.py` in a fresh,
+> isolated environment by default (PEP 517), and in that fresh environment
+> Cython is not yet available, which causes the error:
+> *"Getting requirements to build editable did not run successfully –
+> ModuleNotFoundError: No module named 'Cython'"*.
+> The `--no-build-isolation` flag tells pip to use the **current** environment
+> (which already has Cython and NumPy from step 2) instead of creating a fresh
+> one, so the build succeeds.
+
+**Linux / Windows (WSL):**
+
+```bash
+pip install --no-build-isolation -e orbkit/
+```
+
+**macOS – Apple's clang does not support `-fopenmp`.**
+orbkit's `detci` sub-module is compiled with OpenMP.  Apple's default
+`clang` rejects the `-fopenmp` flag, so you must point the build at a
+GCC that supports it.
+
+*Conda users* (recommended — GCC is already available inside the conda
+environment after this one-liner):
+
+```bash
+conda install -c conda-forge gcc
+CC=gcc pip install --no-build-isolation -e orbkit/
+```
+
+*Homebrew users* (if you prefer not to use conda-forge's GCC):
+
+```bash
+brew install gcc
+# Homebrew installs gcc as gcc-N (e.g. gcc-14); pick whichever is present:
+CC=$(ls /opt/homebrew/bin/gcc-* | sort -V | tail -1) pip install --no-build-isolation -e orbkit/
+```
+
+> **Why `CC=gcc`?**  Setting the `CC` environment variable tells the
+> build system to use GCC instead of Apple's clang.  GCC ships with
+> built-in OpenMP support so the `-fopenmp` flag that orbkit passes
+> when compiling `detci/cy_ci.pyx` is accepted without error.
+
+### 4. Install the remaining Python dependencies
+
+```bash
+pip install "scipy>=1.7,<1.15" "sphecerix==0.5.0" "h5py>=3.0"
+```
+
+> **Why `scipy<1.15`?** SciPy 1.15 changed the `sph_harm` API in a way that
+> breaks sphecerix 0.5.0. Constraining scipy to `<1.15` avoids the issue.
 
 ---
 
