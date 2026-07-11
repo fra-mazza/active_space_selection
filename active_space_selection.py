@@ -516,7 +516,6 @@ def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orb
     )
 
     target_orbitals = []
-    second_best_target_orbitals = []
     warnings = []
     
     # Print mapping for specified orbitals
@@ -526,12 +525,14 @@ def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orb
         idx = orb - 1  # Convert to 0-based index
         # best_match = np.argmax(np.abs(mo_overlap[idx]))
         best_matches  = np.argsort(np.abs(mo_overlap[idx]))[::-1][:len(active_orbitals)]
+        best_match = second_best_match = None
         for j, match in enumerate(best_matches):
             if match +1 in target_orbitals:
                  continue
             else:
                  best_match = match
-                 second_best_match = best_matches[j+1]
+                 if len(best_matches) > 1 and (j + 1) < len(best_matches):
+                     second_best_match = best_matches[j+1]
                  target_orbitals.append(match+1)
                  break
 
@@ -541,10 +542,16 @@ def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orb
         overlap_value = mo_overlap[idx, best_match]
         if abs(overlap_value) < 0.8 or abs(overlap_value) > 1.2 :
              warnings.append([orb, best_match+1, overlap_value])
+        second_best_text = ""
+        if second_best_match is not None:
+            second_best_text = (
+                f" [second best match: {second_best_match+1:3d} "
+                f"({mo_overlap[idx,second_best_match]:.4f})]"
+            )
         try:
-                print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}) [second best match: {second_best_match+1:3d} ({mo_overlap[idx,second_best_match]:.4f})] [original MO overlap: ({mo_overlap[idx,idx]:.4f}) {list(best_matches).index(idx)+1:3d}]")
+                print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}){second_best_text} [original MO overlap: ({mo_overlap[idx,idx]:.4f}) {list(best_matches).index(idx)+1:3d}]")
         except:
-             print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}) [second best match: {second_best_match+1:3d} ({mo_overlap[idx,second_best_match]:.4f})] [original MO overlap: ({mo_overlap[idx,idx]:.4f}) not in list]")
+             print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}){second_best_text} [original MO overlap: ({mo_overlap[idx,idx]:.4f}) not in list]")
 
     target_not_in_active_space = []
     active_space_not_in_target = []
@@ -780,22 +787,25 @@ def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbit
         for j, match in enumerate(best_matches):
             if match + 1 not in target_orbitals:
                 best_match = match
-                second_best_match = best_matches[j + 1]
+                if len(best_matches) > 1 and (j + 1) < len(best_matches):
+                    second_best_match = best_matches[j + 1]
                 target_orbitals.append(match + 1)
                 break
         overlap_value = mo_overlap[idx, best_match]
         if abs(overlap_value) < 0.8 or abs(overlap_value) > 1.2:
             warnings.append([orb, best_match + 1, overlap_value])
+        second_best_text = ""
+        if second_best_match is not None:
+            second_best_text = (f" [second best match: {second_best_match+1:3d} "
+                                f"({mo_overlap[idx,second_best_match]:.4f})]")
         try:
-            print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}) "
-                  f"[second best match: {second_best_match+1:3d} "
-                  f"({mo_overlap[idx,second_best_match]:.4f})] "
+            print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f})"
+                  f"{second_best_text} "
                   f"[original MO overlap: ({mo_overlap[idx,idx]:.4f}) "
                   f"{list(best_matches).index(idx)+1:3d}]")
         except Exception:
-            print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}) "
-                  f"[second best match: {second_best_match+1:3d} "
-                  f"({mo_overlap[idx,second_best_match]:.4f})] "
+            print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f})"
+                  f"{second_best_text} "
                   f"[original MO overlap: ({mo_overlap[idx,idx]:.4f}) not in list]")
 
     _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path)
