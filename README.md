@@ -2,8 +2,10 @@
 
 A tool for automatically selecting and tracking active spaces in multi-reference quantum chemistry calculations across different molecular geometries.
 
-## Please cite:
+## Please cite
+
 Mazza, F., Trinari, M., Sepali, C. and Cappelli, C., 2026. Analytical Nuclear Gradients for the Multiconfigurational Self-Consistent Field Method Coupled with the Polarizable Fluctuating Charges Model. *Journal of Chemical Theory and Computation*, 22(3), pp.1350-1362.
+
 ---
 
 ## Description
