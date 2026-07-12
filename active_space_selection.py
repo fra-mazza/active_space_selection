@@ -440,7 +440,7 @@ def create_rotated_molden(input_molden, output_molden, R_mat, tar_coords):
     # Parse the [GTO] section to extract basis shell information
     shells = parse_gto_basis(input_molden)
     total_basis = sum(n for orb, n in shells)
-    print("Total number of basis functions (from [GTO] shells):", total_basis)
+
     
     # Parse the [MO] section from the input file
     sections = parse_molden_sections(input_molden)
@@ -473,7 +473,7 @@ def create_rotated_molden(input_molden, output_molden, R_mat, tar_coords):
     
     # Write the new Molden file with the updated [MO] section
     write_new_molden_file(input_molden, output_molden, new_mo_coeff_blocks, tar_coords)
-    print(f"Rotated Molden file written to {output_molden}")
+    print(f"[OK] Rotated Molden file: {output_molden}")
 
 def extract_atom_coords_molden(filename):
     """Extract atomic coordinates from the [Atoms] section of a Molden file."""
@@ -520,7 +520,7 @@ def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orb
     
     # Print mapping for specified orbitals
     print("Orbital Mapping Results:")
-    print("Reference -> Target (Overlap)")
+    print("Reference -> Target (Overlap)  | 2nd best")
     for orb in ref_orbitals:
         idx = orb - 1  # Convert to 0-based index
         # best_match = np.argmax(np.abs(mo_overlap[idx]))
@@ -542,39 +542,13 @@ def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orb
         overlap_value = mo_overlap[idx, best_match]
         if abs(overlap_value) < 0.8 or abs(overlap_value) > 1.2 :
              warnings.append([orb, best_match+1, overlap_value])
-        second_best_text = ""
+        second_best_text = "-"
         if second_best_match is not None:
-            second_best_text = (
-                f" [second best match: {second_best_match+1:3d} "
-                f"({mo_overlap[idx,second_best_match]:.4f})]"
-            )
-        try:
-                print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}){second_best_text} [original MO overlap: ({mo_overlap[idx,idx]:.4f}) {list(best_matches).index(idx)+1:3d}]")
-        except:
-             print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f}){second_best_text} [original MO overlap: ({mo_overlap[idx,idx]:.4f}) not in list]")
+            second_best_text = (f"{second_best_match+1:3d} "
+                                f"({mo_overlap[idx,second_best_match]:.4f})")
+        print(f"  {orb:3d} -> {best_match+1:3d} ({overlap_value:.4f}) | {second_best_text}")
 
-    target_not_in_active_space = []
-    active_space_not_in_target = []
-    for targetMO in target_orbitals:
-       if targetMO not in active_orbitals:
-           target_not_in_active_space.append(targetMO)
-           
-    for activeMO in active_orbitals:
-       if activeMO not in target_orbitals:
-           active_space_not_in_target.append(activeMO)
-       
-    # Save alter file
-    with open(alter_path, 'w') as alterfile:
-       line = 'ALTER = '+str(len(active_space_not_in_target))+'; '
-       for i in range(len(active_space_not_in_target)):
-            line = line + '1 '+str(target_not_in_active_space[i])+' '+str(active_space_not_in_target[i])+'; '
-       line = line +' * Generated automatically\n'
-       if warnings != []:
-            line  = line + '* WARNING some orbitals do not match. Check manually\n'
-            for w in warnings:
-                line  = line + '* REF '+str(w[0])+'--> TARGET '+str(w[1])+'  ('+str(w[2])+')\n'
-            print(line)
-       alterfile.write(line)
+    _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path)
      
 # ======================== HDF5 File Processing ================================
 
@@ -721,7 +695,7 @@ def write_rotated_h5(ref_h5, output_h5, C_rot, tar_coords):
                     ds.attrs[attr_name] = attr_val
             else:
                 src.copy(key, dst)
-    print(f"Rotated HDF5 file written to {output_h5}")
+    print(f"[OK] Rotated HDF5 file: {output_h5}")
 
 
 def _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path):
@@ -738,8 +712,10 @@ def _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path):
             line += '* WARNING some orbitals do not match. Check manually\n'
             for w in warnings:
                 line += '* REF ' + str(w[0]) + '--> TARGET ' + str(w[1]) + '  (' + str(w[2]) + ')\n'
-            print(line)
         alterfile.write(line)
+    if warnings:
+        print(f"[WARN] {len(warnings)} low-overlap mapping(s) detected. See {alter_path} for details.")
+    print(f"[OK] ALTER file written: {alter_path}")
 
 
 def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbitals,
@@ -779,7 +755,7 @@ def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbit
     warnings = []
 
     print("Orbital Mapping Results:")
-    print("Reference -> Target (Overlap)")
+    print("Reference -> Target (Overlap)  | 2nd best")
     for orb in ref_orbitals:
         idx = orb - 1
         best_matches = np.argsort(np.abs(mo_overlap[idx]))[::-1][:len(active_orbitals)]
@@ -794,19 +770,11 @@ def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbit
         overlap_value = mo_overlap[idx, best_match]
         if abs(overlap_value) < 0.8 or abs(overlap_value) > 1.2:
             warnings.append([orb, best_match + 1, overlap_value])
-        second_best_text = ""
+        second_best_text = "-"
         if second_best_match is not None:
-            second_best_text = (f" [second best match: {second_best_match+1:3d} "
-                                f"({mo_overlap[idx,second_best_match]:.4f})]")
-        try:
-            print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f})"
-                  f"{second_best_text} "
-                  f"[original MO overlap: ({mo_overlap[idx,idx]:.4f}) "
-                  f"{list(best_matches).index(idx)+1:3d}]")
-        except Exception:
-            print(f"  {orb:3d}    -> {best_match+1:3d}    ({overlap_value:.4f})"
-                  f"{second_best_text} "
-                  f"[original MO overlap: ({mo_overlap[idx,idx]:.4f}) not in list]")
+            second_best_text = (f"{second_best_match+1:3d} "
+                                f"({mo_overlap[idx,second_best_match]:.4f})")
+        print(f"  {orb:3d} -> {best_match+1:3d} ({overlap_value:.4f}) | {second_best_text}")
 
     _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path)
 
@@ -1024,26 +992,24 @@ def main():
     if all_h5 and not _H5PY_AVAILABLE:
         raise ImportError("h5py is required to process HDF5 files: pip install h5py")
 
-    print("Reference files:", args.ref)
-    print("Reference MOs:")
-    for i, (ref_file, orbitals) in enumerate(zip(args.ref, args.ref_orbitals)):
-        print(f"  {ref_file}: {orbitals}")
-
-    print("Target file:", args.target)
-    print("Active space:", args.active_space)
+    print("Run parameters:")
     print("Mode:", "HDF5" if all_h5 else "Molden")
+    print("Target file:", args.target)
+    print(f"Reference files ({len(args.ref)}):")
+    for i, (ref_file, orbitals) in enumerate(zip(args.ref, args.ref_orbitals)):
+        print(f"  {i+1:2d}. {ref_file} | orbitals: {orbitals}")
+    print("Active space:", args.active_space)
 
     if args.atoms:
-        print("Atoms selected for alignment:", args.atoms)
+        print(f"Alignment atoms ({len(args.atoms)}):", args.atoms)
         atom_list = np.array(args.atoms) -1
     else:
-        print("All atoms used for alignment.")
+        print("Alignment atoms: all")
 
 
     
     # Step 1: Compute optimal rotation among the references:
-    print("\nEvaluating file: "+args.target )
-    print("Calculating optimal rotation..." )
+    print("\nStep 1/3: Aligning geometries and selecting best reference...")
 
     tar_coords = extract_atom_coords(args.target)
 
@@ -1083,9 +1049,10 @@ def main():
 
     rotate_path = os.path.join(target_dir, 'rotate.csv')
     np.savetxt(rotate_path, rotation, delimiter=',')
-    print("Rotation matrix saved to rotate.csv --> RMSD: "+str(best_rmsd)+' A.U. ('+best_ref+')')
+    print(f"[OK] Best reference: {best_ref} (RMSD: {best_rmsd:.6f} a.u.)")
+    print(f"[OK] Rotation matrix saved: {rotate_path}")
 
-    print("Computing orbital overlaps...")
+    print("Step 2/3: Rotating reference orbitals...")
     if all_h5:
         # Step 2 (HDF5): rotate MO coefficients in memory using the pre-computed
         #                 AO basis information from the reference HDF5 file.
@@ -1099,6 +1066,7 @@ def main():
         rotated_h5_path = os.path.join(target_dir, 'rotated.h5')
         write_rotated_h5(best_ref, rotated_h5_path, C_rot_raw, tar_coords)
 
+        print("Step 3/3: Computing overlaps and writing ALTER file...")
         # Step 3 (HDF5): compute overlaps using the AO overlap matrix stored in
         #                 the target HDF5 file (no heavy analytical calculation).
         compute_orbital_overlaps_h5(
@@ -1109,6 +1077,7 @@ def main():
         rotated_path = os.path.join(target_dir, 'rotated.molden')
         create_rotated_molden(best_ref, rotated_path, rotation.T, tar_coords)
 
+        print("Step 3/3: Computing overlaps and writing ALTER file...")
         # Step 3 (Molden): compute orbital overlaps via orbkit
         compute_orbital_overlaps(rotated_path, args.target, best_ref_orbitals, args.active_space, alter_path)
 
