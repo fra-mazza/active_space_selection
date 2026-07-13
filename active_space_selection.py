@@ -17,6 +17,9 @@ import re
 from scipy.spatial.transform import Rotation as R
 from sphecerix import tesseral_wigner_D
 
+LOW_OVERLAP_THRESHOLD = 0.8
+HIGH_OVERLAP_THRESHOLD = 1.2
+
 try:
     import h5py
     _H5PY_AVAILABLE = True
@@ -499,6 +502,81 @@ def extract_atom_coords(filename):
 
 # ======================== Overlap Calculation =================================
 
+def _build_orbital_mapping(mo_overlap, ref_orbitals):
+    """
+    Select unique target orbitals for each reference orbital and collect overlap
+    diagnostics for printing and ALTER warnings.
+    """
+    target_orbitals = []
+    warnings = []
+    mapping_rows = []
+
+    for orb in ref_orbitals:
+        idx = orb - 1
+        ranked_matches = np.argsort(np.abs(mo_overlap[idx]))[::-1]
+
+        best_match = None
+        for match in ranked_matches:
+            if match + 1 not in target_orbitals:
+                best_match = int(match)
+                target_orbitals.append(best_match + 1)
+                break
+
+        if best_match is None:
+            raise ValueError(f"Could not find a unique match for reference orbital {orb}")
+
+        overlap_value = float(mo_overlap[idx, best_match])
+        poor_overlap = (
+            abs(overlap_value) < LOW_OVERLAP_THRESHOLD
+            or abs(overlap_value) > HIGH_OVERLAP_THRESHOLD
+        )
+        if poor_overlap:
+            warnings.append([orb, best_match + 1, overlap_value])
+
+        second_best_match = None
+        second_best_overlap = None
+        if abs(overlap_value) < LOW_OVERLAP_THRESHOLD:
+            for match in ranked_matches:
+                if int(match) != best_match:
+                    second_best_match = int(match)
+                    second_best_overlap = float(mo_overlap[idx, second_best_match])
+                    break
+
+        mapping_rows.append({
+            'ref_orbital': orb,
+            'target_orbital': best_match + 1,
+            'overlap': overlap_value,
+            'poor_overlap': poor_overlap,
+            'second_best_orbital': (
+                None if second_best_match is None else second_best_match + 1
+            ),
+            'second_best_overlap': second_best_overlap,
+        })
+
+    return target_orbitals, warnings, mapping_rows
+
+
+def _print_orbital_mapping(mapping_rows):
+    """Print orbital mapping with optional low-overlap diagnostics."""
+    print("Orbital Mapping Results:")
+    print("Reference -> Target (Overlap)")
+    for row in mapping_rows:
+        print(
+            f"  {row['ref_orbital']:3d} -> {row['target_orbital']:3d} "
+            f"({row['overlap']:.4f})"
+        )
+        if row['second_best_orbital'] is not None:
+            print(
+                f"      2nd best: {row['second_best_orbital']:3d} "
+                f"({row['second_best_overlap']:.4f})"
+            )
+        if row['poor_overlap']:
+            print(
+                f"      [WARN] Poor overlap for REF {row['ref_orbital']} -> "
+                f"TARGET {row['target_orbital']}: |S|={abs(row['overlap']):.4f}"
+            )
+
+
 def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orbitals, alter_path):
     """Calculate and print orbital overlaps"""
     from orbkit import read, analytical_integrals
@@ -515,38 +593,10 @@ def compute_orbital_overlaps(rotated_file, target_file, ref_orbitals, active_orb
         qc_rot.mo_spec, qc_tar.mo_spec, ao_overlap
     )
 
-    target_orbitals = []
-    warnings = []
-    
-    # Print mapping for specified orbitals
-    print("Orbital Mapping Results:")
-    print("Reference -> Target (Overlap)  | 2nd best")
-    for orb in ref_orbitals:
-        idx = orb - 1  # Convert to 0-based index
-        # best_match = np.argmax(np.abs(mo_overlap[idx]))
-        best_matches  = np.argsort(np.abs(mo_overlap[idx]))[::-1][:len(active_orbitals)]
-        best_match = second_best_match = None
-        for j, match in enumerate(best_matches):
-            if match +1 in target_orbitals:
-                 continue
-            else:
-                 best_match = match
-                 if len(best_matches) > 1 and (j + 1) < len(best_matches):
-                     second_best_match = best_matches[j+1]
-                 target_orbitals.append(match+1)
-                 break
-
-             
-             
-        # target_orbitals.append(best_match + 1)
-        overlap_value = mo_overlap[idx, best_match]
-        if abs(overlap_value) < 0.8 or abs(overlap_value) > 1.2 :
-             warnings.append([orb, best_match+1, overlap_value])
-        second_best_text = "-"
-        if second_best_match is not None:
-            second_best_text = (f"{second_best_match+1:3d} "
-                                f"({mo_overlap[idx,second_best_match]:.4f})")
-        print(f"  {orb:3d} -> {best_match+1:3d} ({overlap_value:.4f}) | {second_best_text}")
+    target_orbitals, warnings, mapping_rows = _build_orbital_mapping(
+        mo_overlap, ref_orbitals
+    )
+    _print_orbital_mapping(mapping_rows)
 
     _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path)
      
@@ -751,30 +801,10 @@ def compute_orbital_overlaps_h5(C_rot_raw, target_h5, ref_orbitals, active_orbit
     # mo_overlap[i, j] = <ref_MO_i | tar_MO_j>
     mo_overlap = C_rot_raw @ S_AO @ C_tar_raw.T
 
-    target_orbitals = []
-    warnings = []
-
-    print("Orbital Mapping Results:")
-    print("Reference -> Target (Overlap)  | 2nd best")
-    for orb in ref_orbitals:
-        idx = orb - 1
-        best_matches = np.argsort(np.abs(mo_overlap[idx]))[::-1][:len(active_orbitals)]
-        best_match = second_best_match = None
-        for j, match in enumerate(best_matches):
-            if match + 1 not in target_orbitals:
-                best_match = match
-                if len(best_matches) > 1 and (j + 1) < len(best_matches):
-                    second_best_match = best_matches[j + 1]
-                target_orbitals.append(match + 1)
-                break
-        overlap_value = mo_overlap[idx, best_match]
-        if abs(overlap_value) < 0.8 or abs(overlap_value) > 1.2:
-            warnings.append([orb, best_match + 1, overlap_value])
-        second_best_text = "-"
-        if second_best_match is not None:
-            second_best_text = (f"{second_best_match+1:3d} "
-                                f"({mo_overlap[idx,second_best_match]:.4f})")
-        print(f"  {orb:3d} -> {best_match+1:3d} ({overlap_value:.4f}) | {second_best_text}")
+    target_orbitals, warnings, mapping_rows = _build_orbital_mapping(
+        mo_overlap, ref_orbitals
+    )
+    _print_orbital_mapping(mapping_rows)
 
     _write_alter_file(target_orbitals, active_orbitals, warnings, alter_path)
 

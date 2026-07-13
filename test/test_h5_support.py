@@ -94,6 +94,45 @@ def read_rotation_csv(tmpdir):
 
 # ───────────────────────── fixtures ─────────────────────────────────────────
 
+class TestOverlapReporting:
+    """Unit tests for overlap-to-report formatting and warning logic."""
+
+    def test_second_best_reported_only_for_low_overlap(self):
+        from active_space_selection import _build_orbital_mapping
+
+        mo_overlap = np.array([
+            [0.95, 0.50, 0.40, 0.10],
+            [0.90, 0.60, 0.55, 0.05],
+        ])
+        target_orbitals, warnings, mapping_rows = _build_orbital_mapping(
+            mo_overlap, [1, 2]
+        )
+
+        assert len(target_orbitals) == 2
+        assert len(set(target_orbitals)) == 2
+        assert mapping_rows[0]["second_best_orbital"] is None
+        assert mapping_rows[1]["second_best_orbital"] is not None
+        assert len(warnings) == 1
+
+    def test_poor_overlap_warning_is_printed_explicitly(self, capsys):
+        from active_space_selection import _print_orbital_mapping
+
+        mapping_rows = [{
+            "ref_orbital": 23,
+            "target_orbital": 25,
+            "overlap": 0.6123,
+            "poor_overlap": True,
+            "second_best_orbital": 24,
+            "second_best_overlap": 0.5987,
+        }]
+        _print_orbital_mapping(mapping_rows)
+        out = capsys.readouterr().out
+
+        assert "23 ->  25 (0.6123)" in out
+        assert "2nd best:  24 (0.5987)" in out
+        assert "[WARN] Poor overlap for REF 23 -> TARGET 25" in out
+
+
 @pytest.fixture(scope="module")
 def molden_result(tmp_path_factory):
     tmpdir = str(tmp_path_factory.mktemp("molden"))
