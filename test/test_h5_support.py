@@ -257,11 +257,11 @@ class TestH5VsMoldenConsistency:
 
     def test_h5_script_mode_reported(self, h5_result):
         stdout_h, _ = h5_result
-        assert "Mode: HDF5" in stdout_h
+        assert "Mode" in stdout_h and "HDF5" in stdout_h
 
     def test_molden_script_mode_reported(self, molden_result):
         stdout_m, _ = molden_result
-        assert "Mode: Molden" in stdout_m
+        assert "Mode" in stdout_m and "Molden" in stdout_m
 
 
 class TestMixedInputRejected:
@@ -374,6 +374,86 @@ class TestLazyOrbkitImport:
             ) from exc
         finally:
             sys.modules.update(saved)
+
+
+class TestAutoActiveSpace:
+    """Tests for the automatic active space calculation feature."""
+
+    def test_compute_active_space_unit(self):
+        """Test compute_active_space logic on dummy occupations."""
+        from active_space_selection import compute_active_space
+
+        # Example: 10 occupied, 10 virtual. HOMO=10, LUMO=11
+        occupations = [2.0] * 10 + [0.0] * 10
+        # 8 electrons in 7 orbitals -> 4 occupied, 3 virtual active orbitals
+        # Occupied: 7, 8, 9, 10
+        # Virtual: 11, 12, 13
+        active = compute_active_space(occupations, 8, 7)
+        assert active == [7, 8, 9, 10, 11, 12, 13]
+
+    def test_compute_active_space_casscf_fails(self):
+        """Test that CASSCF-like occupations (not 2.0 or 0.0) raise SystemExit."""
+        from active_space_selection import compute_active_space
+        import pytest
+
+        occupations = [2.0] * 8 + [1.8, 0.2] + [0.0] * 10
+        with pytest.raises(SystemExit):
+            compute_active_space(occupations, 4, 4)
+
+    def test_auto_active_space_integration_h5(self, tmp_path):
+        """Run the script with --act_elect and --act_orb on HDF5 files and check output."""
+        target_copy = shutil.copy(TAR_H5, tmp_path)
+        cmd = [
+            sys.executable,
+            os.path.join(REPO_ROOT, "active_space_selection.py"),
+            "--ref", REF_H5,
+            "--ref_orbitals", REF_ORBS_STR,
+            "--target", target_copy,
+            "--act_elect", "8",
+            "--act_orb", "7"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        assert res.returncode == 0
+        assert "Target Active Space: 22-28" in res.stdout
+        
+        alter_file = os.path.join(tmp_path, "ALTER.txt")
+        assert os.path.isfile(alter_file)
+        with open(alter_file) as f:
+            alter_content = f.read()
+        assert "ALTER = 2;" in alter_content
+
+    def test_auto_active_space_integration_molden(self, tmp_path):
+        """Run the script with --act_elect and --act_orb on Molden files and check output."""
+        target_copy = shutil.copy(TAR_MOLDEN, tmp_path)
+        cmd = [
+            sys.executable,
+            os.path.join(REPO_ROOT, "active_space_selection.py"),
+            "--ref", REF_MOLDEN,
+            "--ref_orbitals", REF_ORBS_STR,
+            "--target", target_copy,
+            "--act_elect", "8",
+            "--act_orb", "7"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        assert res.returncode == 0
+        assert "Target Active Space: 22-28" in res.stdout
+
+    def test_mutually_exclusive_validation(self, tmp_path):
+        """Check that specifying both --active_space and --act_elect/--act_orb triggers parser error."""
+        target_copy = shutil.copy(TAR_H5, tmp_path)
+        cmd = [
+            sys.executable,
+            os.path.join(REPO_ROOT, "active_space_selection.py"),
+            "--ref", REF_H5,
+            "--ref_orbitals", REF_ORBS_STR,
+            "--target", target_copy,
+            "--active_space", "22-28",
+            "--act_elect", "8",
+            "--act_orb", "7"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        assert res.returncode != 0
+        assert "mutually exclusive" in res.stderr
 
 
 # ───────────────────────── standalone runner ─────────────────────────────────

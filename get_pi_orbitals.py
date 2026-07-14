@@ -63,6 +63,35 @@ class ParseMixedListAction(argparse.Action):
         setattr(namespace, self.dest, parse_mixed_list(joined))
 
 
+def format_integer_list(lst):
+    """
+    Converts a list of integers into a sorted, compact range string.
+    Example: [1, 2, 3, 5, 7, 8] -> "1-3,5,7-8"
+    """
+    if not lst:
+        return ""
+    sorted_lst = sorted(list(set(lst)))
+    ranges = []
+    start = sorted_lst[0]
+    end = sorted_lst[0]
+    
+    for val in sorted_lst[1:]:
+        if val == end + 1:
+            end = val
+        else:
+            if start == end:
+                ranges.append(str(start))
+            else:
+                ranges.append(f"{start}-{end}")
+            start = val
+            end = val
+    if start == end:
+        ranges.append(str(start))
+    else:
+        ranges.append(f"{start}-{end}")
+    return ",".join(ranges)
+
+
 def is_h5_file(filepath):
     return filepath.lower().endswith(".h5") or filepath.lower().endswith(".hdf5")
 
@@ -574,6 +603,83 @@ def write_alter_from_pi_selection(selected_pi_orbitals, active_space, alter_path
         alterfile.write(line)
 
 
+def load_molden_occupations(filename):
+    sections = parse_molden_sections(filename)
+    mo_text = None
+    for header, sec in sections:
+        if header.strip().upper().startswith("[MO]"):
+            mo_text = sec
+            break
+    if mo_text is None:
+        raise ValueError("MO section not found in Molden file.")
+    mo_blocks = parse_mo_block(mo_text)
+    occupations = []
+    for block in mo_blocks:
+        occup = None
+        for h in block["header"]:
+            m = re.match(r"^\s*Occup\s*=\s*([0-9\.\+-eE]+)", h, re.IGNORECASE)
+            if m:
+                occup = float(m.group(1))
+                break
+        if occup is None:
+            raise ValueError(f"Occupation number not found for an MO in {filename}.")
+        occupations.append(occup)
+    return occupations
+
+
+def load_h5_occupations(filename):
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to read HDF5 files: pip install h5py")
+    with h5py.File(filename, "r") as f:
+        if "MO_OCCUPATIONS" not in f:
+            raise ValueError(f"MO_OCCUPATIONS dataset not found in HDF5 file {filename}.")
+        return list(np.array(f["MO_OCCUPATIONS"], dtype=float))
+
+
+def load_occupations(filename):
+    if is_h5_file(filename):
+        return load_h5_occupations(filename)
+    else:
+        return load_molden_occupations(filename)
+
+
+def compute_active_space(occupations, act_elect, act_orb):
+    tol = 1e-5
+    for occ in occupations:
+        if abs(occ - 2.0) > tol and abs(occ - 0.0) > tol:
+            print("WARNING: This feature only works for fully occupied orbitals (eg. SCF or localized) and that you need to manually specify the active orbitals.")
+            raise SystemExit(1)
+
+    occ_indices = [i + 1 for i, occ in enumerate(occupations) if abs(occ - 2.0) < tol]
+    virt_indices = [i + 1 for i, occ in enumerate(occupations) if abs(occ - 0.0) < tol]
+
+    if not occ_indices:
+        raise ValueError("No occupied orbitals found in the MO file.")
+    if not virt_indices:
+        raise ValueError("No virtual orbitals found in the MO file.")
+
+    homo = occ_indices[-1]
+    lumo = virt_indices[0]
+
+    n_occ_act = act_elect // 2
+    n_virt_act = act_orb - n_occ_act
+
+    if n_occ_act <= 0 or n_virt_act < 0:
+        raise ValueError(f"Invalid split: {n_occ_act} occupied, {n_virt_act} virtual active orbitals.")
+
+    occ_start = homo - n_occ_act + 1
+    if occ_start < 1:
+        raise ValueError("Not enough occupied orbitals for the requested active space.")
+    active_occupied = list(range(occ_start, homo + 1))
+
+    virt_end = lumo + n_virt_act - 1
+    if virt_end > len(occupations):
+        raise ValueError("Not enough virtual orbitals for the requested active space.")
+    active_virtual = list(range(lumo, lumo + n_virt_act))
+
+    return active_occupied + active_virtual
+
+
 def get_molden_ao_overlap(filename):
     from orbkit import read, analytical_integrals
     qc = read.main_read(filename, itype="molden", all_mo=True)
@@ -628,7 +734,53 @@ def main():
             "Defaults to ALTER.txt in the target-file directory."
         ),
     )
+    parser.add_argument(
+        "--act_elect",
+        type=int,
+        default=None,
+        metavar="ACT_ELECT",
+        help=(
+            "Number of active electrons to automatically compute the active space.\n"
+            "Must be specified together with --act_orb and is mutually exclusive with --active_space."
+        )
+    )
+    parser.add_argument(
+        "--act_orb",
+        type=int,
+        default=None,
+        metavar="ACT_ORB",
+        help=(
+            "Number of active orbitals to automatically compute the active space.\n"
+            "Must be specified together with --act_elect and is mutually exclusive with --active_space."
+        )
+    )
     args = parser.parse_args()
+
+    # Validation of mutually exclusive and co-dependent arguments
+    if args.active_space:
+        if args.act_elect is not None or args.act_orb is not None:
+            parser.error("Arguments --active_space and --act_elect/--act_orb are mutually exclusive.")
+    else:
+        if (args.act_elect is None) != (args.act_orb is None):
+            parser.error("Arguments --act_elect and --act_orb must be specified together.")
+
+    # Compute active space automatically if requested
+    if not args.active_space and args.act_elect is not None and args.act_orb is not None:
+        try:
+            if not os.path.isfile(args.target):
+                raise FileNotFoundError(f"Target file not found: {args.target}")
+            occupations = load_occupations(args.target)
+        except Exception as e:
+            print("WARNING: Could not compute active orbitals. Please check the number of active electrons and active orbitals.")
+            raise SystemExit(1)
+        
+        try:
+            args.active_space = compute_active_space(occupations, args.act_elect, args.act_orb)
+            if not args.active_space:
+                raise ValueError("Computed active space is empty.")
+        except Exception as e:
+            print("WARNING: Could not compute active orbitals. Please check the number of active electrons and active orbitals.")
+            raise SystemExit(1)
 
     if args.top_n <= 0:
         raise ValueError("--top_n must be a positive integer.")
@@ -648,15 +800,20 @@ def main():
     sel_coords = coords[np.array(selected) - 1]
     _, normal, distances = best_fit_plane(sel_coords)
 
-    print("Target file:", args.target)
-    print("Selected atoms (1-based):", selected)
-    print(f"Best-fit plane normal: [{normal[0]:+.6f}, {normal[1]:+.6f}, {normal[2]:+.6f}]")
-    print(f"Planarity check: max distance = {np.max(distances):.6f}, RMS distance = {np.sqrt(np.mean(distances**2)):.6f}")
-    if np.max(distances) > args.planarity_threshold:
-        print(
-            "WARNING: selected atoms are not close to a single plane "
-            f"(max distance {np.max(distances):.6f} > threshold {args.planarity_threshold:.6f})."
-        )
+    print("================================================================================")
+    print(f"          Pi-like Orbital Analysis [Target: {args.target}]")
+    print("================================================================================")
+    print("Input Configuration:")
+    print(f"  Mode               : {'HDF5' if is_h5_file(args.target) else 'Molden'}")
+    print(f"  Target File        : {args.target}")
+    formatted_atoms = format_integer_list(selected)
+    print(f"  Selected Atoms     : {formatted_atoms}")
+    if args.active_space:
+        formatted_active = format_integer_list(args.active_space)
+        print(f"  Target Active Space: {formatted_active}")
+    print(f"  Planarity Threshold: {args.planarity_threshold:.6f}")
+    print(f"  Top N Display      : {args.top_n}")
+    print("--------------------------------------------------------------------------------")
 
     # --- 3) Load MO coefficients / AO overlap and identify p-shell blocks ---
     if is_h5_file(args.target):
@@ -683,22 +840,44 @@ def main():
             "Check atom selection and basis content."
         )
 
+    print("Plane Fitting & Projectors:")
+    print(f"  Best-fit Normal    : [{normal[0]:+.6f}, {normal[1]:+.6f}, {normal[2]:+.6f}]")
+    max_dist = np.max(distances)
+    rms_dist = np.sqrt(np.mean(distances**2))
+    print(f"  Planarity Check    : Max distance = {max_dist:.6f}, RMS distance = {rms_dist:.6f}")
+    if max_dist > args.planarity_threshold:
+        print(
+            f"  [!] WARNING        : Selected atoms are not close to a single plane\n"
+            f"                       (max distance {max_dist:.6f} > threshold {args.planarity_threshold:.6f})."
+        )
+
     used_atoms = sorted(set(atom for atom, _ in projectors))
     missing = [a for a in selected if a not in used_atoms]
     if missing:
-        print(f"WARNING: no p-shells found for selected atoms: {missing}")
+        formatted_missing = format_integer_list(missing)
+        print(f"  [!] WARNING        : No p-shells found for selected atoms: {formatted_missing}")
 
     projector_file = save_projector_orbitals(args.target, projectors)
-    print(f"Saved pi projectors to: {projector_file}")
+    print(f"  Pi Projectors File : Saved to {projector_file}")
+    print("--------------------------------------------------------------------------------")
 
     # --- 5) Score all MOs and print ranked list ---
     scores = compute_pi_scores(C_mo, S_ao, projectors)
     ranked = rank_pi_orbitals(scores, args.top_n)
 
-    print("\nTop orbitals by pi character:")
-    print("  MO   PiScore")
-    for mo_idx, score in ranked:
-        print(f"{mo_idx:4d}  {score:.6f}")
+    print("Top Orbitals by Pi Character:")
+    if args.active_space:
+        n_active = len(args.active_space)
+        top_for_active = rank_pi_orbitals(scores, n_active)
+        selected_pi_orbitals = [mo_idx for mo_idx, _ in top_for_active]
+        print("    MO    PiScore    In Active Space?")
+        for mo_idx, score in ranked:
+            in_active = "Yes" if mo_idx in selected_pi_orbitals else "No"
+            print(f"  {mo_idx:>4d}    {score:.6f}    {in_active}")
+    else:
+        print("    MO    PiScore")
+        for mo_idx, score in ranked:
+            print(f"  {mo_idx:>4d}    {score:.6f}")
 
     # If an active space was provided, automatically create an ALTER file using
     # the top-N pi orbitals, where N is the active-space size.
@@ -713,17 +892,25 @@ def main():
         alter_path = resolve_alter_path(args.target, args.alter)
         write_alter_from_pi_selection(selected_pi_orbitals, args.active_space, alter_path)
 
-        print(f"\nActive-space size: {n_active}")
-        print("Top pi orbitals used for ALTER:", selected_pi_orbitals)
-        print(f"ALTER file written to: {alter_path}")
+        print("--------------------------------------------------------------------------------")
+        print("ALTER Configuration:")
+        print(f"  Active-space Size  : {n_active}")
+        print(f"  Top Pi MOs selected: {format_integer_list(selected_pi_orbitals)}")
+        print(f"  ALTER File         : Saved to {alter_path}")
+        
+        with open(alter_path, "r") as f:
+            alter_content = f.read().rstrip()
+        print(f"\nALTER File Content (saved to {alter_path}):")
+        print(alter_content)
 
         high_score_count = np.sum(scores > PI_SCORE_HIGH_THRESHOLD)
         if high_score_count > n_active:
             print(
-                "WARNING: More than N orbitals have high PiScore "
-                f"(>{PI_SCORE_HIGH_THRESHOLD:.1f}): {high_score_count} orbitals vs N={n_active}. "
-                "Important pi orbitals may be excluded; consider increasing the active space."
+                f"\n  [!] WARNING        : More than N orbitals have high PiScore\n"
+                f"                       (>{PI_SCORE_HIGH_THRESHOLD:.1f}): {high_score_count} orbitals vs N={n_active}.\n"
+                f"                       Important pi orbitals may be excluded; consider increasing the active space."
             )
+    print("================================================================================")
 
 
 if __name__ == "__main__":
