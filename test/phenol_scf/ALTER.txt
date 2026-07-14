@@ -1,3 +1,3 @@
-ALTER = 1; 1 18 22;  * Generated automatically
+ALTER = 2; 1 18 23; 1 34 28;  * Generated automatically
 * WARNING some orbitals do not match. Check manually
 * REF 19--> TARGET 18  (0.5661483141546163)
