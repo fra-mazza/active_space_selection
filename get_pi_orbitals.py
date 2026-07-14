@@ -63,6 +63,35 @@ class ParseMixedListAction(argparse.Action):
         setattr(namespace, self.dest, parse_mixed_list(joined))
 
 
+def format_integer_list(lst):
+    """
+    Converts a list of integers into a sorted, compact range string.
+    Example: [1, 2, 3, 5, 7, 8] -> "1-3,5,7-8"
+    """
+    if not lst:
+        return ""
+    sorted_lst = sorted(list(set(lst)))
+    ranges = []
+    start = sorted_lst[0]
+    end = sorted_lst[0]
+    
+    for val in sorted_lst[1:]:
+        if val == end + 1:
+            end = val
+        else:
+            if start == end:
+                ranges.append(str(start))
+            else:
+                ranges.append(f"{start}-{end}")
+            start = val
+            end = val
+    if start == end:
+        ranges.append(str(start))
+    else:
+        ranges.append(f"{start}-{end}")
+    return ",".join(ranges)
+
+
 def is_h5_file(filepath):
     return filepath.lower().endswith(".h5") or filepath.lower().endswith(".hdf5")
 
@@ -648,15 +677,20 @@ def main():
     sel_coords = coords[np.array(selected) - 1]
     _, normal, distances = best_fit_plane(sel_coords)
 
-    print("Target file:", args.target)
-    print("Selected atoms (1-based):", selected)
-    print(f"Best-fit plane normal: [{normal[0]:+.6f}, {normal[1]:+.6f}, {normal[2]:+.6f}]")
-    print(f"Planarity check: max distance = {np.max(distances):.6f}, RMS distance = {np.sqrt(np.mean(distances**2)):.6f}")
-    if np.max(distances) > args.planarity_threshold:
-        print(
-            "WARNING: selected atoms are not close to a single plane "
-            f"(max distance {np.max(distances):.6f} > threshold {args.planarity_threshold:.6f})."
-        )
+    print("================================================================================")
+    print(f"          Pi-like Orbital Analysis [Target: {args.target}]")
+    print("================================================================================")
+    print("Input Configuration:")
+    print(f"  Mode               : {'HDF5' if is_h5_file(args.target) else 'Molden'}")
+    print(f"  Target File        : {args.target}")
+    formatted_atoms = format_integer_list(selected)
+    print(f"  Selected Atoms     : {formatted_atoms}")
+    if args.active_space:
+        formatted_active = format_integer_list(args.active_space)
+        print(f"  Target Active Space: {formatted_active}")
+    print(f"  Planarity Threshold: {args.planarity_threshold:.6f}")
+    print(f"  Top N Display      : {args.top_n}")
+    print("--------------------------------------------------------------------------------")
 
     # --- 3) Load MO coefficients / AO overlap and identify p-shell blocks ---
     if is_h5_file(args.target):
@@ -683,22 +717,41 @@ def main():
             "Check atom selection and basis content."
         )
 
+    print("Plane Fitting & Projectors:")
+    print(f"  Best-fit Normal    : [{normal[0]:+.6f}, {normal[1]:+.6f}, {normal[2]:+.6f}]")
+    max_dist = np.max(distances)
+    rms_dist = np.sqrt(np.mean(distances**2))
+    print(f"  Planarity Check    : Max distance = {max_dist:.6f}, RMS distance = {rms_dist:.6f}")
+    if max_dist > args.planarity_threshold:
+        print(
+            f"  [!] WARNING        : Selected atoms are not close to a single plane\n"
+            f"                       (max distance {max_dist:.6f} > threshold {args.planarity_threshold:.6f})."
+        )
+
     used_atoms = sorted(set(atom for atom, _ in projectors))
     missing = [a for a in selected if a not in used_atoms]
     if missing:
-        print(f"WARNING: no p-shells found for selected atoms: {missing}")
+        formatted_missing = format_integer_list(missing)
+        print(f"  [!] WARNING        : No p-shells found for selected atoms: {formatted_missing}")
 
     projector_file = save_projector_orbitals(args.target, projectors)
-    print(f"Saved pi projectors to: {projector_file}")
+    print(f"  Pi Projectors File : Saved to {projector_file}")
+    print("--------------------------------------------------------------------------------")
 
     # --- 5) Score all MOs and print ranked list ---
     scores = compute_pi_scores(C_mo, S_ao, projectors)
     ranked = rank_pi_orbitals(scores, args.top_n)
 
-    print("\nTop orbitals by pi character:")
-    print("  MO   PiScore")
-    for mo_idx, score in ranked:
-        print(f"{mo_idx:4d}  {score:.6f}")
+    print("Top Orbitals by Pi Character:")
+    if args.active_space:
+        print("    MO    PiScore    In Active Space?")
+        for mo_idx, score in ranked:
+            in_active = "Yes" if mo_idx in args.active_space else "No"
+            print(f"  {mo_idx:>4d}    {score:.6f}    {in_active}")
+    else:
+        print("    MO    PiScore")
+        for mo_idx, score in ranked:
+            print(f"  {mo_idx:>4d}    {score:.6f}")
 
     # If an active space was provided, automatically create an ALTER file using
     # the top-N pi orbitals, where N is the active-space size.
@@ -713,17 +766,25 @@ def main():
         alter_path = resolve_alter_path(args.target, args.alter)
         write_alter_from_pi_selection(selected_pi_orbitals, args.active_space, alter_path)
 
-        print(f"\nActive-space size: {n_active}")
-        print("Top pi orbitals used for ALTER:", selected_pi_orbitals)
-        print(f"ALTER file written to: {alter_path}")
+        print("--------------------------------------------------------------------------------")
+        print("ALTER Configuration:")
+        print(f"  Active-space Size  : {n_active}")
+        print(f"  Top Pi MOs selected: {format_integer_list(selected_pi_orbitals)}")
+        print(f"  ALTER File         : Saved to {alter_path}")
+        
+        with open(alter_path, "r") as f:
+            alter_content = f.read().rstrip()
+        print(f"\nALTER File Content (saved to {alter_path}):")
+        print(alter_content)
 
         high_score_count = np.sum(scores > PI_SCORE_HIGH_THRESHOLD)
         if high_score_count > n_active:
             print(
-                "WARNING: More than N orbitals have high PiScore "
-                f"(>{PI_SCORE_HIGH_THRESHOLD:.1f}): {high_score_count} orbitals vs N={n_active}. "
-                "Important pi orbitals may be excluded; consider increasing the active space."
+                f"\n  [!] WARNING        : More than N orbitals have high PiScore\n"
+                f"                       (>{PI_SCORE_HIGH_THRESHOLD:.1f}): {high_score_count} orbitals vs N={n_active}.\n"
+                f"                       Important pi orbitals may be excluded; consider increasing the active space."
             )
+    print("================================================================================")
 
 
 if __name__ == "__main__":

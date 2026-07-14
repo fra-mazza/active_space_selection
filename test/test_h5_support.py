@@ -257,11 +257,11 @@ class TestH5VsMoldenConsistency:
 
     def test_h5_script_mode_reported(self, h5_result):
         stdout_h, _ = h5_result
-        assert "Mode: HDF5" in stdout_h
+        assert "Mode" in stdout_h and "HDF5" in stdout_h
 
     def test_molden_script_mode_reported(self, molden_result):
         stdout_m, _ = molden_result
-        assert "Mode: Molden" in stdout_m
+        assert "Mode" in stdout_m and "Molden" in stdout_m
 
 
 class TestMixedInputRejected:
