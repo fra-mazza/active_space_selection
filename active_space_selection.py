@@ -918,6 +918,84 @@ def parse_list_of_mo_lists(input_str):
         result.append(sub)
     return result
 
+
+def load_molden_occupations(filename):
+    sections = parse_molden_sections(filename)
+    mo_text = None
+    for header, sec in sections:
+        if header.strip().upper().startswith("[MO]"):
+            mo_text = sec
+            break
+    if mo_text is None:
+        raise ValueError("MO section not found in Molden file.")
+    mo_blocks = parse_mo_block(mo_text)
+    occupations = []
+    for block in mo_blocks:
+        occup = None
+        for h in block["header"]:
+            m = re.match(r"^\s*Occup\s*=\s*([0-9\.\+-eE]+)", h, re.IGNORECASE)
+            if m:
+                occup = float(m.group(1))
+                break
+        if occup is None:
+            raise ValueError(f"Occupation number not found for an MO in {filename}.")
+        occupations.append(occup)
+    return occupations
+
+
+def load_h5_occupations(filename):
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to read HDF5 files: pip install h5py")
+    with h5py.File(filename, "r") as f:
+        if "MO_OCCUPATIONS" not in f:
+            raise ValueError(f"MO_OCCUPATIONS dataset not found in HDF5 file {filename}.")
+        return list(np.array(f["MO_OCCUPATIONS"], dtype=float))
+
+
+def load_occupations(filename):
+    if is_h5_file(filename):
+        return load_h5_occupations(filename)
+    else:
+        return load_molden_occupations(filename)
+
+
+def compute_active_space(occupations, act_elect, act_orb):
+    tol = 1e-5
+    for occ in occupations:
+        if abs(occ - 2.0) > tol and abs(occ - 0.0) > tol:
+            print("WARNING: This feature only works for fully occupied orbitals (eg. SCF or localized), otherwise you need to manually specify the active orbitals using teh --active_space keyword.")
+            raise SystemExit(1)
+
+    occ_indices = [i + 1 for i, occ in enumerate(occupations) if abs(occ - 2.0) < tol]
+    virt_indices = [i + 1 for i, occ in enumerate(occupations) if abs(occ - 0.0) < tol]
+
+    if not occ_indices:
+        raise ValueError("No occupied orbitals found in the MO file.")
+    if not virt_indices:
+        raise ValueError("No virtual orbitals found in the MO file.")
+
+    homo = occ_indices[-1]
+    lumo = virt_indices[0]
+
+    n_occ_act = act_elect // 2
+    n_virt_act = act_orb - n_occ_act
+
+    if n_occ_act <= 0 or n_virt_act < 0:
+        raise ValueError(f"Invalid split: {n_occ_act} occupied, {n_virt_act} virtual active orbitals.")
+
+    occ_start = homo - n_occ_act + 1
+    if occ_start < 1:
+        raise ValueError("Not enough occupied orbitals for the requested active space.")
+    active_occupied = list(range(occ_start, homo + 1))
+
+    virt_end = lumo + n_virt_act - 1
+    if virt_end > len(occupations):
+        raise ValueError("Not enough virtual orbitals for the requested active space.")
+    active_virtual = list(range(lumo, lumo + n_virt_act))
+
+    return active_occupied + active_virtual
+
+
 # --- custom actions ------------------------
 
 class ParseMixedListAction(argparse.Action):
@@ -963,6 +1041,11 @@ def main():
             "                       Example: 1-3:5,7-8 means orbitals [1,2,3] and [5,7,8].\n"
             "  --active_space      Specify active orbitals (1-based indices) for the system. Use\n"
             "                       commas for individual orbitals and hyphens for ranges. Example: 4,6-9.\n"
+            "                       Mutually exclusive with --act_elect and --act_orb.\n"
+            "  --act_elect         Number of active electrons to automatically compute the active space.\n"
+            "                       Must be specified together with --act_orb and is mutually exclusive with --active_space.\n"
+            "  --act_orb           Number of active orbitals to automatically compute the active space.\n"
+            "                       Must be specified together with --act_elect and is mutually exclusive with --active_space.\n"
             "  --atoms             (Optional) Specify which atom indices (1-based) to include in the alignment\n"
             "                       algorithm. Supports commas and ranges (e.g., 1,3-5,8). If omitted,\n"
             "                       all atoms in each file are used.\n"
@@ -1009,7 +1092,7 @@ def main():
 
     parser.add_argument(
         '--active_space',
-        required=True,
+        required=False,
         nargs='+',
         action=ParseMixedListAction,
         metavar='ACTIVE',
@@ -1018,6 +1101,22 @@ def main():
             "Use commas to separate single orbitals and hyphens for ranges.\n"
             "Example: --active_space 4,6-9 means orbitals [4,6,7,8,9]."
         )
+    )
+
+    parser.add_argument(
+        '--act_elect',
+        type=int,
+        default=None,
+        metavar='ACT_ELECT',
+        help="Number of active electrons to automatically compute the active space."
+    )
+
+    parser.add_argument(
+        '--act_orb',
+        type=int,
+        default=None,
+        metavar='ACT_ORB',
+        help="Number of active orbitals to automatically compute the active space."
     )
 
     parser.add_argument(
@@ -1049,6 +1148,34 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Validation of mutually exclusive and co-dependent arguments
+    if args.active_space is not None:
+        if args.act_elect is not None or args.act_orb is not None:
+            parser.error("Arguments --active_space and --act_elect/--act_orb are mutually exclusive.")
+    else:
+        if args.act_elect is None and args.act_orb is None:
+            parser.error("Either --active_space OR both --act_elect and --act_orb must be specified.")
+        if (args.act_elect is None) != (args.act_orb is None):
+            parser.error("Arguments --act_elect and --act_orb must be specified together.")
+
+    # Compute active space automatically if requested
+    if args.active_space is None:
+        try:
+            if not os.path.isfile(args.target):
+                raise FileNotFoundError(f"Target file not found: {args.target}")
+            occupations = load_occupations(args.target)
+        except Exception as e:
+            print("WARNING: Could not compute active orbitals. Please check the number of active electrons and active orbitals.")
+            raise SystemExit(1)
+        
+        try:
+            args.active_space = compute_active_space(occupations, args.act_elect, args.act_orb)
+            if not args.active_space:
+                raise ValueError("Computed active space is empty.")
+        except Exception as e:
+            print("WARNING: Could not compute active orbitals. Please check the number of active electrons and active orbitals.")
+            raise SystemExit(1)
 
     target_dir = os.path.dirname(os.path.abspath(args.target))
     if not os.path.isdir(target_dir):

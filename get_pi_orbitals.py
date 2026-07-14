@@ -603,6 +603,83 @@ def write_alter_from_pi_selection(selected_pi_orbitals, active_space, alter_path
         alterfile.write(line)
 
 
+def load_molden_occupations(filename):
+    sections = parse_molden_sections(filename)
+    mo_text = None
+    for header, sec in sections:
+        if header.strip().upper().startswith("[MO]"):
+            mo_text = sec
+            break
+    if mo_text is None:
+        raise ValueError("MO section not found in Molden file.")
+    mo_blocks = parse_mo_block(mo_text)
+    occupations = []
+    for block in mo_blocks:
+        occup = None
+        for h in block["header"]:
+            m = re.match(r"^\s*Occup\s*=\s*([0-9\.\+-eE]+)", h, re.IGNORECASE)
+            if m:
+                occup = float(m.group(1))
+                break
+        if occup is None:
+            raise ValueError(f"Occupation number not found for an MO in {filename}.")
+        occupations.append(occup)
+    return occupations
+
+
+def load_h5_occupations(filename):
+    if not _H5PY_AVAILABLE:
+        raise ImportError("h5py is required to read HDF5 files: pip install h5py")
+    with h5py.File(filename, "r") as f:
+        if "MO_OCCUPATIONS" not in f:
+            raise ValueError(f"MO_OCCUPATIONS dataset not found in HDF5 file {filename}.")
+        return list(np.array(f["MO_OCCUPATIONS"], dtype=float))
+
+
+def load_occupations(filename):
+    if is_h5_file(filename):
+        return load_h5_occupations(filename)
+    else:
+        return load_molden_occupations(filename)
+
+
+def compute_active_space(occupations, act_elect, act_orb):
+    tol = 1e-5
+    for occ in occupations:
+        if abs(occ - 2.0) > tol and abs(occ - 0.0) > tol:
+            print("WARNING: This feature only works for fully occupied orbitals (eg. SCF or localized) and that you need to manually specify the active orbitals.")
+            raise SystemExit(1)
+
+    occ_indices = [i + 1 for i, occ in enumerate(occupations) if abs(occ - 2.0) < tol]
+    virt_indices = [i + 1 for i, occ in enumerate(occupations) if abs(occ - 0.0) < tol]
+
+    if not occ_indices:
+        raise ValueError("No occupied orbitals found in the MO file.")
+    if not virt_indices:
+        raise ValueError("No virtual orbitals found in the MO file.")
+
+    homo = occ_indices[-1]
+    lumo = virt_indices[0]
+
+    n_occ_act = act_elect // 2
+    n_virt_act = act_orb - n_occ_act
+
+    if n_occ_act <= 0 or n_virt_act < 0:
+        raise ValueError(f"Invalid split: {n_occ_act} occupied, {n_virt_act} virtual active orbitals.")
+
+    occ_start = homo - n_occ_act + 1
+    if occ_start < 1:
+        raise ValueError("Not enough occupied orbitals for the requested active space.")
+    active_occupied = list(range(occ_start, homo + 1))
+
+    virt_end = lumo + n_virt_act - 1
+    if virt_end > len(occupations):
+        raise ValueError("Not enough virtual orbitals for the requested active space.")
+    active_virtual = list(range(lumo, lumo + n_virt_act))
+
+    return active_occupied + active_virtual
+
+
 def get_molden_ao_overlap(filename):
     from orbkit import read, analytical_integrals
     qc = read.main_read(filename, itype="molden", all_mo=True)
@@ -657,7 +734,53 @@ def main():
             "Defaults to ALTER.txt in the target-file directory."
         ),
     )
+    parser.add_argument(
+        "--act_elect",
+        type=int,
+        default=None,
+        metavar="ACT_ELECT",
+        help=(
+            "Number of active electrons to automatically compute the active space.\n"
+            "Must be specified together with --act_orb and is mutually exclusive with --active_space."
+        )
+    )
+    parser.add_argument(
+        "--act_orb",
+        type=int,
+        default=None,
+        metavar="ACT_ORB",
+        help=(
+            "Number of active orbitals to automatically compute the active space.\n"
+            "Must be specified together with --act_elect and is mutually exclusive with --active_space."
+        )
+    )
     args = parser.parse_args()
+
+    # Validation of mutually exclusive and co-dependent arguments
+    if args.active_space:
+        if args.act_elect is not None or args.act_orb is not None:
+            parser.error("Arguments --active_space and --act_elect/--act_orb are mutually exclusive.")
+    else:
+        if (args.act_elect is None) != (args.act_orb is None):
+            parser.error("Arguments --act_elect and --act_orb must be specified together.")
+
+    # Compute active space automatically if requested
+    if not args.active_space and args.act_elect is not None and args.act_orb is not None:
+        try:
+            if not os.path.isfile(args.target):
+                raise FileNotFoundError(f"Target file not found: {args.target}")
+            occupations = load_occupations(args.target)
+        except Exception as e:
+            print("WARNING: Could not compute active orbitals. Please check the number of active electrons and active orbitals.")
+            raise SystemExit(1)
+        
+        try:
+            args.active_space = compute_active_space(occupations, args.act_elect, args.act_orb)
+            if not args.active_space:
+                raise ValueError("Computed active space is empty.")
+        except Exception as e:
+            print("WARNING: Could not compute active orbitals. Please check the number of active electrons and active orbitals.")
+            raise SystemExit(1)
 
     if args.top_n <= 0:
         raise ValueError("--top_n must be a positive integer.")
@@ -744,9 +867,12 @@ def main():
 
     print("Top Orbitals by Pi Character:")
     if args.active_space:
+        n_active = len(args.active_space)
+        top_for_active = rank_pi_orbitals(scores, n_active)
+        selected_pi_orbitals = [mo_idx for mo_idx, _ in top_for_active]
         print("    MO    PiScore    In Active Space?")
         for mo_idx, score in ranked:
-            in_active = "Yes" if mo_idx in args.active_space else "No"
+            in_active = "Yes" if mo_idx in selected_pi_orbitals else "No"
             print(f"  {mo_idx:>4d}    {score:.6f}    {in_active}")
     else:
         print("    MO    PiScore")
