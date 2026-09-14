@@ -87,10 +87,33 @@ automatically.
 > (which already has Cython and NumPy from step 2) instead of creating a fresh
 > one, so the build succeeds.
 
+> **Just as important – use `--config-settings editable_mode=compat`.**
+> The repository checks out the orbkit submodule into a directory that is
+> itself called `orbkit/` (so the layout is
+> `active_space_selection/orbkit/orbkit/…`). Modern setuptools (≥ 64) makes
+> editable installs work through a `sys.meta_path` finder that is registered
+> *after* Python's normal path-based import machinery. Because the outer
+> `orbkit/` submodule directory sits right next to `active_space_selection.py`
+> and has no `__init__.py`, Python's normal import machinery treats it as a
+> (broken) *namespace package* called `orbkit` and resolves imports against it
+> **before** the editable finder ever gets a chance to point at the real,
+> compiled package — but only when a script is run from the repository root
+> (exactly what the [Usage](#usage) examples below do). The symptom is a
+> confusing deep-import failure such as:
+> ```
+> ImportError: cannot import name 'get_atom_symbol' from 'orbkit.tools' (unknown location)
+> ```
+> `--config-settings editable_mode=compat` makes pip/setuptools fall back to
+> the older, simpler editable-install mechanism (a `.pth` file that adds the
+> real package directory to `sys.path`), which does not have this problem and
+> works correctly regardless of the current working directory. This flag
+> requires a reasonably recent pip (≥ 23); if it is rejected as an unknown
+> option, run `pip install --upgrade pip` first.
+
 **Linux / Windows (WSL):**
 
 ```bash
-pip install --no-build-isolation -e orbkit/
+pip install --no-build-isolation --config-settings editable_mode=compat -e orbkit/
 ```
 
 **macOS – Apple's clang does not support `-fopenmp`.**
@@ -103,7 +126,7 @@ environment after this one-liner):
 
 ```bash
 conda install -c conda-forge gcc
-CC=gcc pip install --no-build-isolation -e orbkit/
+CC=gcc pip install --no-build-isolation --config-settings editable_mode=compat -e orbkit/
 ```
 
 *Homebrew users* (if you prefer not to use conda-forge's GCC):
@@ -111,7 +134,7 @@ CC=gcc pip install --no-build-isolation -e orbkit/
 ```bash
 brew install gcc
 # Homebrew installs gcc as gcc-N (e.g. gcc-14); pick whichever is present:
-CC=$(ls /opt/homebrew/bin/gcc-* | sort -V | tail -1) pip install --no-build-isolation -e orbkit/
+CC=$(ls /opt/homebrew/bin/gcc-* | sort -V | tail -1) pip install --no-build-isolation --config-settings editable_mode=compat -e orbkit/
 ```
 
 > **Why `CC=gcc`?**  Setting the `CC` environment variable tells the
@@ -119,14 +142,40 @@ CC=$(ls /opt/homebrew/bin/gcc-* | sort -V | tail -1) pip install --no-build-isol
 > built-in OpenMP support so the `-fopenmp` flag that orbkit passes
 > when compiling `detci/cy_ci.pyx` is accepted without error.
 
+**Sanity check** – before moving on, verify orbkit imports correctly *from
+the repository root* (this is the case that silently breaks without
+`editable_mode=compat`):
+
+```bash
+cd active_space_selection   # repository root
+python -c "import orbkit.tools; print('orbkit OK:', orbkit.tools.__file__)"
+```
+
+This must print a path ending in `.../orbkit/orbkit/tools.py`. If it raises
+`ImportError` or prints a path that doesn't contain a *second* `orbkit/`
+component, the editable install fell back to the broken namespace-package
+resolution — reinstall with the `--config-settings editable_mode=compat`
+flag shown above (uninstall first with `pip uninstall orbkit`).
+
 ### 4. Install the remaining Python dependencies
 
 ```bash
-pip install "scipy>=1.7,<1.15" "sphecerix==0.5.0" "h5py>=3.0"
+pip install "scipy>=1.7,<1.15" "sphecerix==0.5.0" "h5py>=3.0" matplotlib
 ```
 
 > **Why `scipy<1.15`?** SciPy 1.15 changed the `sph_harm` API in a way that
 > breaks sphecerix 0.5.0. Constraining scipy to `<1.15` avoids the issue.
+
+> **Why `matplotlib` again, explicitly?** `sphecerix` 0.5.0 imports
+> `matplotlib` unconditionally at package import time (`sphecerix/__init__.py`
+> → `matrixplot.py` → `import matplotlib.pyplot`), but does **not** declare
+> it as a dependency. In step 3, installing orbkit happens to pull in
+> matplotlib as a side effect (it is one of orbkit's own dependencies), which
+> is the only reason `import sphecerix` doesn't crash with
+> `ModuleNotFoundError: No module named 'matplotlib'`. Installing it
+> explicitly here removes that hidden ordering dependency, so the install
+> keeps working even if this step is ever run on its own or orbkit's
+> dependency list changes.
 
 ---
 
