@@ -23,7 +23,7 @@ Mazza, F., Trinari, M., Sepali, C. and Cappelli, C., 2026. Analytical Nuclear Gr
 
 ## Overview
 
-When you run a **CASSCF** (or other multi-reference) calculation at several points along a reaction path, on a PES scan, or across a series of related molecules, OpenMolcas has no memory of which orbitals belong in the active space from one geometry to the next: the ordering and shape of the MOs can shift, and re-selecting the active space by hand at every point is slow and error-prone. This repository automates that orbital-tracking problem.
+Picking the active space for a **CASSCF** (or other multi-reference) calculation is normally a manual, visual step. That's fine for a single geometry, but as soon as you need the *same physical* active space on many geometries of the same molecule — snapshots along a reaction path or PES scan, or structures extracted from an MD trajectory — the ordering and shape of the MOs shifts from one geometry to the next, and re-selecting the active space by hand at every point is slow and error-prone. This repository automates that: it re-identifies the active-space orbitals on a new geometry starting from an active space you already selected on a reference geometry.
 
 The package has three command-line scripts:
 
