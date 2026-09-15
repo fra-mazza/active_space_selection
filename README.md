@@ -296,10 +296,10 @@ The Molden and HDF5 pathways produce numerically identical orbital mappings and 
 ## Tests
 
 ```bash
-python -m pytest test/test_h5_support.py -v
+python -m pytest test/ -v
 ```
 
-The test suite verifies:
+`test/test_h5_support.py` verifies:
 
 - HDF5 file-type detection
 - Coordinate extraction (HDF5 vs Molden agreement)
@@ -309,6 +309,22 @@ The test suite verifies:
 - Wigner D matrices are unitary
 - HDF5 and Molden workflows produce the same orbital mapping and `ALTER.txt`
 - Mixed-type inputs (one Molden, one HDF5) are rejected with a clear error
+- The `--act_elect`/`--act_orb` automatic active-space feature
+
+`test/test_additional_features.py` covers `get_pi_orbitals.py` and
+`combine_alter_files.py` (previously untested), CLI argument-validation edge
+cases across all three scripts, and output determinism — all using the same
+`test/phenol_scf` data. Notably, `get_pi_orbitals.py`'s purely-geometric
+π-character ranking is checked against the phenol active space
+(`test/ref_orbitals.txt` / `test/active_orbitals.txt`), which was chosen
+independently of that script, as a genuine correctness cross-check rather
+than a self-consistency tautology.
+
+These two files only exercise a single closed-shell SCF wavefunction with an
+s/p/d basis set. Additional test scenarios — genuine CASSCF active spaces
+with fractional natural-orbital occupations, f/g basis functions, the
+multi-reference RMSD selection, and `--atoms`-subset alignment — are planned
+but need purpose-built QM calculations not yet part of the repository.
 
 ---
 
