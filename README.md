@@ -295,36 +295,39 @@ The Molden and HDF5 pathways produce numerically identical orbital mappings and 
 
 ## Tests
 
+A single command runs the entire suite — this is the recommended way to
+confirm right after installing that everything (including the orbkit build)
+actually works:
+
 ```bash
-python -m pytest test/ -v
+python -m pytest test/test_suite.py -v
 ```
 
-`test/test_h5_support.py` verifies:
+All 60+ tests run against the one real QM calculation checked into
+`test/phenol_scf/` (a closed-shell SCF wavefunction for phenol, s/p/d
+basis) — no external QM software is required. Coverage includes:
 
-- HDF5 file-type detection
-- Coordinate extraction (HDF5 vs Molden agreement)
-- Rotation-block coverage (all AOs are covered exactly once)
-- Identity rotation is a no-op on MO coefficients
-- Reference MOs are orthonormal under the AO overlap
-- Wigner D matrices are unitary
+- HDF5 file-type detection and coordinate extraction (HDF5 vs Molden agreement)
+- Rotation-block coverage (all AOs covered exactly once) and Wigner-D unitarity
 - HDF5 and Molden workflows produce the same orbital mapping and `ALTER.txt`
 - Mixed-type inputs (one Molden, one HDF5) are rejected with a clear error
 - The `--act_elect`/`--act_orb` automatic active-space feature
+- `get_pi_orbitals.py` (previously untested): its purely-geometric
+  π-character ranking is checked against the phenol active space
+  (`test/ref_orbitals.txt` / `test/active_orbitals.txt`), which was chosen
+  independently of that script — a genuine correctness cross-check, not a
+  self-consistency tautology
+- `combine_alter_files.py` (previously untested): splitting the active
+  space into two disjoint pieces, running the main script on each, and
+  combining the results must match a single full-active-space run
+- CLI / argument-validation edge cases across all three scripts
+- Determinism: repeated runs on identical inputs give byte-identical output files
 
-`test/test_additional_features.py` covers `get_pi_orbitals.py` and
-`combine_alter_files.py` (previously untested), CLI argument-validation edge
-cases across all three scripts, and output determinism — all using the same
-`test/phenol_scf` data. Notably, `get_pi_orbitals.py`'s purely-geometric
-π-character ranking is checked against the phenol active space
-(`test/ref_orbitals.txt` / `test/active_orbitals.txt`), which was chosen
-independently of that script, as a genuine correctness cross-check rather
-than a self-consistency tautology.
-
-These two files only exercise a single closed-shell SCF wavefunction with an
-s/p/d basis set. Additional test scenarios — genuine CASSCF active spaces
-with fractional natural-orbital occupations, f/g basis functions, the
-multi-reference RMSD selection, and `--atoms`-subset alignment — are planned
-but need purpose-built QM calculations not yet part of the repository.
+This single closed-shell SCF/s-p-d test case cannot exercise everything —
+genuine CASSCF active spaces with fractional natural-orbital occupations,
+f/g basis functions, multi-reference RMSD selection, and `--atoms`-subset
+alignment are planned but need purpose-built QM calculations not yet part
+of the repository.
 
 ---
 
