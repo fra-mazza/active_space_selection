@@ -12,6 +12,7 @@ build/
 test/phenol_scf/ALTER.txt
 test/phenol_scf/rotate.csv
 test/phenol_scf/rotated.molden
+test/phenol_scf/rotated.h5
 
 # Pytest
 .pytest_cache/
