@@ -23,17 +23,17 @@ Mazza, F., Trinari, M., Sepali, C. and Cappelli, C., 2026. Analytical Nuclear Gr
 
 ## Overview
 
-Picking the active space for a **CASSCF** (or other multi-reference) calculation is normally a manual, visual step. That's fine for a single geometry, but as soon as you need the *same physical* active space on many geometries of the same molecule — snapshots along a reaction path or PES scan, or structures extracted from an MD trajectory — the ordering and shape of the MOs shifts from one geometry to the next, and re-selecting the active space by hand at every point is slow and error-prone. This repository automates that: it re-identifies the active-space orbitals on a new geometry starting from an active space you already selected on a reference geometry.
+Selecting the active space for a **CASSCF** (or other multi-reference) calculation is normally a manual, visual step. This repository automates the case where the *same physical* active space must be identified on many geometries of the same molecule: snapshots along a reaction path or a PES scan, or structures extracted from an MD trajectory. Between geometries, the ordering and shape of the MOs can change, so an active space selected once must be re-identified by hand on every subsequent geometry. This tool automates that re-identification, starting from an active space already selected on a reference geometry.
 
-The package has three command-line scripts:
+The package provides three command-line scripts:
 
 | Script | Purpose |
 |---|---|
 | [`active_space_selection.py`](#usage-active_space_selectionpy) | Main tool. Aligns a reference geometry onto a target geometry, rotates the reference MOs into the target's orientation, and matches them to the target MOs by overlap, producing an OpenMolcas `ALTER` block. |
-| [`get_pi_orbitals.py`](#usage-get_pi_orbitalspy) | Ranks MOs by π-character relative to a best-fit plane through a chosen set of atoms — useful for picking out the π/π* active space of a (quasi-)planar aromatic system without visual inspection. |
+| [`get_pi_orbitals.py`](#usage-get_pi_orbitalspy) | Ranks MOs by π-character relative to a best-fit plane through a chosen set of atoms, for identifying the π/π* active space of a (quasi-)planar aromatic system without visual inspection. |
 | [`combine_alter_files.py`](#usage-combine_alter_filespy) | Merges several partial `ALTER` files (e.g. one per independently-tracked molecular fragment) into a single `ALTER` block for the whole system. |
 
-`active_space_selection.py` accepts either **Molden** or **OpenMolcas HDF5** (`.h5`) files as input. The two modes are numerically equivalent (see [How it works](#how-it-works)); HDF5 is faster because it reuses the AO overlap matrix already stored in the file instead of recomputing it.
+`active_space_selection.py` accepts either **Molden** or **OpenMolcas HDF5** (`.h5`) files as input. The two modes are numerically equivalent (see [How it works](#how-it-works)). HDF5 is faster, since it reuses the AO overlap matrix already stored in the file instead of recomputing it.
 
 ### The `active_space_selection.py` workflow
 
@@ -65,7 +65,7 @@ git clone --recurse-submodules https://github.com/fra-mazza/active_space_selecti
 cd active_space_selection
 ```
 
-Already cloned without `--recurse-submodules`? Initialise it separately:
+If the repository was already cloned without `--recurse-submodules`, initialize the submodule separately:
 
 ```bash
 git submodule update --init --recursive
@@ -85,12 +85,12 @@ pip install "numpy>=1.20" cython setuptools
 pip install --no-build-isolation --config-settings editable_mode=compat -e orbkit/
 ```
 
-Both flags matter and are explained in [Troubleshooting](#troubleshooting):
+Both flags are required. The reasons are explained in [Troubleshooting](#troubleshooting):
 
-- `--no-build-isolation` — without it, pip builds orbkit in a fresh environment that doesn't have Cython, and the install fails with `ModuleNotFoundError: No module named 'Cython'`.
-- `--config-settings editable_mode=compat` — without it, running any script from the repository root (exactly what the examples below do) makes Python silently import the *wrong* orbkit and fail deep inside with a confusing `ImportError`.
+- `--no-build-isolation`: without it, pip builds orbkit in a fresh environment without Cython, and the install fails with `ModuleNotFoundError: No module named 'Cython'`.
+- `--config-settings editable_mode=compat`: without it, running any script from the repository root imports the wrong orbkit and fails deep inside with a confusing `ImportError`.
 
-**On macOS**, Apple's `clang` doesn't support `-fopenmp`, which orbkit's `detci` submodule needs, so point the build at a real GCC:
+**On macOS**, Apple's `clang` does not support `-fopenmp`, which orbkit's `detci` submodule requires. Point the build at GCC instead:
 
 ```bash
 # Conda (recommended):
@@ -108,7 +108,7 @@ CC=$(ls /opt/homebrew/bin/gcc-* | sort -V | tail -1) pip install --no-build-isol
 pip install "scipy>=1.7,<1.15" "sphecerix==0.5.0" "h5py>=3.0" matplotlib
 ```
 
-(`scipy<1.15` and the explicit `matplotlib` are both required for reasons that only bite in certain install orders — see [Troubleshooting](#troubleshooting).)
+`scipy<1.15` and the explicit `matplotlib` are both required; the reasons are order-dependent and explained in [Troubleshooting](#troubleshooting).
 
 ### 5. Verify the install
 
@@ -117,7 +117,7 @@ python -c "import orbkit.tools; print('orbkit OK:', orbkit.tools.__file__)"
 python -m pytest test/test_suite.py -v
 ```
 
-The first command must print a path ending in `.../orbkit/orbkit/tools.py` — see [Troubleshooting](#troubleshooting) if it doesn't. The test suite (60+ tests, no external QM software needed) is the recommended way to confirm the whole install — including the orbkit build — actually works; see [Tests](#tests).
+The first command must print a path ending in `.../orbkit/orbkit/tools.py`; see [Troubleshooting](#troubleshooting) otherwise. The test suite (60+ tests, no external QM software required) is the recommended way to confirm the install, including the orbkit build; see [Tests](#tests).
 
 ---
 
@@ -187,7 +187,7 @@ python active_space_selection.py \
 
 ## Usage: `get_pi_orbitals.py`
 
-Given a (quasi-)planar set of atoms, this ranks all MOs by how much π-character they have relative to that plane — a per-atom perpendicular-p projector, weighted so compact (inner) contracted shells dominate over diffuse ones. It's a way to pick out a π/π* active space without opening a viewer, and can optionally build an `ALTER` block from the top-ranked π orbitals directly.
+Given a (quasi-)planar set of atoms, this script ranks all MOs by π-character relative to that plane, using a per-atom perpendicular-p projector weighted so that compact (inner) contracted shells dominate over diffuse ones. It identifies a π/π* active space without visual inspection, and can optionally build an `ALTER` block from the top-ranked π orbitals directly.
 
 ```
 python get_pi_orbitals.py \
@@ -220,7 +220,7 @@ python get_pi_orbitals.py \
     --top_n 7
 ```
 
-The top 7 orbitals by π-score reproduce phenol's known active space `{19,23,24,25,26,27,34}` — this is checked in the test suite as a genuine correctness cross-check, since that active space was chosen independently of this script.
+The top 7 orbitals by π-score reproduce phenol's known active space, `{19,23,24,25,26,27,34}`. The test suite checks this as a correctness cross-check, since that active space was chosen independently of this script.
 
 ---
 
@@ -280,25 +280,25 @@ The Wigner-D rotation of AO shells is implemented for **s, p, d, f, and g functi
 
 ## Tests
 
-A single command runs the entire suite — the recommended way to confirm right after installing that everything (including the orbkit build) actually works:
+A single command runs the entire suite, and is the recommended way to confirm the install works after setup:
 
 ```bash
 python -m pytest test/test_suite.py -v
 ```
 
-All 60+ tests run against the one real QM calculation checked into `test/phenol_scf/` (a closed-shell SCF wavefunction for phenol, s/p/d basis) — no external QM software is required. Coverage includes:
+All 60+ tests run against the one real QM calculation checked into `test/phenol_scf/` (a closed-shell SCF wavefunction for phenol, s/p/d basis); no external QM software is required. Coverage includes:
 
 - HDF5 file-type detection and coordinate extraction (HDF5 vs Molden agreement)
 - Rotation-block coverage (all AOs covered exactly once) and Wigner-D unitarity
 - HDF5 and Molden workflows produce the same orbital mapping and `ALTER.txt`
 - Mixed-type inputs (one Molden, one HDF5) are rejected with a clear error
 - The `--act_elect`/`--act_orb` automatic active-space feature
-- `get_pi_orbitals.py`: its purely-geometric π-character ranking is checked against the phenol active space, which was chosen independently of that script — a genuine correctness cross-check, not a self-consistency tautology
+- `get_pi_orbitals.py`: its purely-geometric π-character ranking is checked against the phenol active space, which was chosen independently of that script (a correctness cross-check, not a self-consistency tautology)
 - `combine_alter_files.py`: splitting the active space into two disjoint pieces, running the main script on each, and combining the results must match a single full-active-space run
 - CLI / argument-validation edge cases across all three scripts
 - Determinism: repeated runs on identical inputs give byte-identical output files
 
-This single closed-shell SCF/s-p-d test case can't exercise everything — genuine CASSCF active spaces with fractional natural-orbital occupations, f/g basis functions, multi-reference RMSD selection, and `--atoms`-subset alignment are planned but need purpose-built QM calculations not yet part of the repository.
+This single closed-shell SCF/s-p-d test case cannot exercise everything. Genuine CASSCF active spaces with fractional natural-orbital occupations, f/g basis functions, multi-reference RMSD selection, and `--atoms`-subset alignment are planned but need purpose-built QM calculations not yet part of the repository.
 
 ---
 
@@ -317,9 +317,9 @@ This single closed-shell SCF/s-p-d test case can't exercise everything — genui
 
 ### `ImportError: cannot import name '...' from 'orbkit....' (unknown location)`
 
-This happens if orbkit was installed *without* `--config-settings editable_mode=compat` (step 3) and a script is then run from the repository root — exactly what the usage examples above do.
+Cause: orbkit was installed without `--config-settings editable_mode=compat` (step 3), and a script is then run from the repository root.
 
-The repository checks out the orbkit submodule into a directory that is itself called `orbkit/`, so the layout is `active_space_selection/orbkit/orbkit/…`. Modern setuptools (≥ 64) makes editable installs work through a `sys.meta_path` finder that is registered *after* Python's normal path-based import machinery. Because the outer `orbkit/` submodule directory sits right next to `active_space_selection.py` and has no `__init__.py`, Python's normal import machinery treats it as a *namespace package* called `orbkit` and resolves imports against it **before** the editable finder gets a chance to point at the real, compiled package.
+The repository checks out the orbkit submodule into a directory itself called `orbkit/`, so the layout is `active_space_selection/orbkit/orbkit/…`. Modern setuptools (≥ 64) implements editable installs through a `sys.meta_path` finder that is registered after Python's normal path-based import machinery. Because the outer `orbkit/` submodule directory sits next to `active_space_selection.py` and has no `__init__.py`, Python's normal import machinery treats it as a namespace package called `orbkit` and resolves imports against it before the editable finder can point at the real, compiled package.
 
 Fix: reinstall with the compat flag (uninstall first):
 
@@ -328,7 +328,7 @@ pip uninstall orbkit
 pip install --no-build-isolation --config-settings editable_mode=compat -e orbkit/
 ```
 
-`editable_mode=compat` falls back to the older, simpler editable-install mechanism (a `.pth` file that adds the real package directory to `sys.path`), which doesn't have this problem regardless of the current working directory. This flag needs a reasonably recent pip (≥ 23); if it's rejected as an unknown option, run `pip install --upgrade pip` first.
+`editable_mode=compat` uses the older, simpler editable-install mechanism (a `.pth` file that adds the real package directory to `sys.path`), which does not have this problem regardless of the current working directory. This flag requires pip ≥ 23; if it is rejected as an unknown option, run `pip install --upgrade pip` first.
 
 Verify the fix:
 
@@ -337,16 +337,16 @@ cd active_space_selection   # repository root
 python -c "import orbkit.tools; print(orbkit.tools.__file__)"
 ```
 
-This must print a path ending in `.../orbkit/orbkit/tools.py`. A shorter path (missing the second `orbkit/`) or an `ImportError` means the broken namespace-package resolution is still happening.
+This must print a path ending in `.../orbkit/orbkit/tools.py`. A shorter path (missing the second `orbkit/`) or an `ImportError` means the broken namespace-package resolution is still occurring.
 
 ### `ModuleNotFoundError: No module named 'Cython'` while installing orbkit
 
-`orbkit/setup.py` imports Cython at module level, but modern pip (≥ 21.3) builds packages in a fresh, isolated environment by default (PEP 517) that doesn't have Cython. Install with `--no-build-isolation` (as in step 3 above) so pip uses the current environment, which already has Cython from step 2.
+`orbkit/setup.py` imports Cython at module level, but modern pip (≥ 21.3) builds packages by default in a fresh, isolated environment (PEP 517) that does not have Cython. Install with `--no-build-isolation` (step 3) so pip uses the current environment, which already has Cython from step 2.
 
 ### `ModuleNotFoundError: No module named 'matplotlib'` when importing sphecerix
 
-`sphecerix` 0.5.0 imports `matplotlib` unconditionally at import time (`sphecerix/__init__.py` → `matrixplot.py` → `import matplotlib.pyplot`) without declaring it as a dependency. Installing orbkit (step 3) happens to pull in matplotlib as a side effect, which is normally the only reason this doesn't fail — installing matplotlib explicitly in step 4 removes that hidden ordering dependency.
+`sphecerix` 0.5.0 imports `matplotlib` unconditionally at import time (`sphecerix/__init__.py` → `matrixplot.py` → `import matplotlib.pyplot`), without declaring it as a dependency. Installing orbkit (step 3) pulls in matplotlib as a side effect, which is normally the only reason this import succeeds. Installing matplotlib explicitly in step 4 removes that hidden ordering dependency.
 
 ### macOS: `-fopenmp` rejected by clang
 
-Apple's default `clang` doesn't support OpenMP, which orbkit's `detci` submodule requires. Set `CC` to a real GCC before installing (see the macOS instructions in step 3) — GCC ships with built-in OpenMP support, so the `-fopenmp` flag orbkit passes when compiling `detci/cy_ci.pyx` is accepted.
+Apple's default `clang` does not support OpenMP, which orbkit's `detci` submodule requires. Set `CC` to a GCC build before installing (see the macOS instructions in step 3). GCC has built-in OpenMP support, so the `-fopenmp` flag orbkit passes when compiling `detci/cy_ci.pyx` is accepted.
